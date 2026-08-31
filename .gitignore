@@ -1,0 +1,17 @@
+node_modules/
+dist/
+data/
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+*.log
+coverage/
+.wrangler/
+.next/
+.vinext/
+.vite/
+.DS_Store
+*.tsbuildinfo

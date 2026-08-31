@@ -1,0 +1,28 @@
+[Unit]
+Description=Agentic Trading Manager
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agentic-trader
+Group=agentic-trader
+WorkingDirectory=/opt/agentic-trading-manager/current
+EnvironmentFile=/etc/agentic-trading-manager/agentic-trading-manager.env
+ExecStart=/usr/bin/node /opt/agentic-trading-manager/current/dist/api/index.js
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/agentic-trading-manager /var/backups/agentic-trading-manager
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

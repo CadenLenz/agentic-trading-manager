@@ -1,0 +1,53 @@
+{
+  "name": "agentic-trading-manager",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Simulation-first autonomous multi-strategy trading control plane for Raspberry Pi.",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "dev": "concurrently -k -n API,WEB -c blue,green \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:web": "vite --host 127.0.0.1",
+    "dev:api": "tsx watch apps/api/src/index.ts",
+    "build": "npm run build:web && npm run build:api",
+    "build:web": "vite build",
+    "build:api": "tsup apps/api/src/index.ts --format esm --platform node --target node22 --out-dir dist/api --clean --sourcemap",
+    "start": "node dist/api/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.api.json --noEmit",
+    "lint": "eslint apps packages scripts src tests vite.config.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "migrate": "tsx scripts/migrate.ts",
+    "backup": "tsx scripts/backup.ts",
+    "security:audit": "npm audit --omit=dev"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/cors": "^11.1.0",
+    "@fastify/rate-limit": "^10.3.0",
+    "@fastify/static": "^10.1.3",
+    "better-sqlite3": "^12.2.0",
+    "fastify": "^5.6.1",
+    "lucide-react": "^0.468.0",
+    "pino": "^9.6.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@openai/sites-vite-plugin": "^0.2.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.19.19",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "concurrently": "^9.2.1",
+    "eslint": "^9.39.4",
+    "tsx": "^4.20.6",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.2",
+    "vite": "^8.0.13",
+    "vitest": "^3.2.4"
+  }
+}
