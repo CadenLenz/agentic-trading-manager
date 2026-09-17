@@ -20,7 +20,7 @@ describe('RiskEngine deterministic gates', () => {
 
   it('enforces research-only and forbidden directives above an agent proposal', () => {
     const { risk, directives, close } = fixture(); cleanups.push(close);
-    directives.create({ strategyId: 'day-trader', type: 'RESEARCH_ONLY', symbol: 'NVDA', value: {}, reason: 'Test', expiresAt: null }, 'test');
+    directives.create({ strategyId: 'AGGRESSIVE_STOCKS', type: 'RESEARCH_ONLY', symbol: 'NVDA', value: {}, reason: 'Test', expiresAt: null }, 'test');
     directives.create({ strategyId: null, type: 'FORBIDDEN_SYMBOL', symbol: 'NVDA', value: {}, reason: 'Test', expiresAt: null }, 'test');
     const decision = risk.evaluate(proposal(), risk.defaultContext());
     expect(codes(decision)).toEqual(expect.arrayContaining(['RESEARCH_ONLY', 'FORBIDDEN_SYMBOL']));
@@ -28,19 +28,19 @@ describe('RiskEngine deterministic gates', () => {
 
   it('ignores an expired directive', () => {
     const { database, risk, close } = fixture(); cleanups.push(close);
-    database.raw.prepare('INSERT INTO directives(id,strategy_id,type,symbol,value_json,reason,expires_at,active,created_at) VALUES(?,?,?,?,?,?,?,?,?)').run('expired', 'day-trader', 'RESEARCH_ONLY', 'NVDA', '{}', 'expired', new Date(Date.now() - 1_000).toISOString(), 1, new Date(Date.now() - 5_000).toISOString());
+    database.raw.prepare('INSERT INTO directives(id,strategy_id,type,symbol,value_json,reason,expires_at,active,created_at) VALUES(?,?,?,?,?,?,?,?,?)').run('expired', 'AGGRESSIVE_STOCKS', 'RESEARCH_ONLY', 'NVDA', '{}', 'expired', new Date(Date.now() - 1_000).toISOString(), 1, new Date(Date.now() - 5_000).toISOString());
     expect(codes(risk.evaluate(proposal(), risk.defaultContext()))).not.toContain('RESEARCH_ONLY');
   });
 
   it('enforces global and strategy pause gates', () => {
     const { database, risk, close } = fixture(); cleanups.push(close);
-    database.setSetting('global_pause', true); database.setStrategyEnabled('day-trader', false, 'test', 'test');
+    database.setSetting('global_pause', true); database.setStrategyEnabled('AGGRESSIVE_STOCKS', false, 'test', 'test');
     const decision = risk.evaluate(proposal(), risk.defaultContext());
     expect(codes(decision)).toEqual(expect.arrayContaining(['GLOBAL_PAUSE', 'STRATEGY_PAUSED']));
   });
 
   it('permits a protective sell while globally paused', () => {
-    const { database, ledger, risk, close } = fixture(); cleanups.push(close); buy(ledger, 'day-trader', 'NVDA', 1, 100, 'protective'); database.setSetting('global_pause', true);
+    const { database, ledger, risk, close } = fixture(); cleanups.push(close); buy(ledger, 'AGGRESSIVE_STOCKS', 'NVDA', 1, 100, 'protective'); database.setSetting('global_pause', true);
     const decision = risk.evaluate(proposal({ action: 'SELL', source: 'PROTECTIVE', orderIntent: { side: 'SELL', quantity: 1, orderType: 'MARKET', timeInForce: 'DAY', assetType: 'EQUITY' } }), risk.defaultContext());
     expect(codes(decision)).not.toContain('GLOBAL_PAUSE'); expect(decision.approved).toBe(true);
   });
@@ -69,7 +69,7 @@ describe('RiskEngine deterministic gates', () => {
   });
 
   it('enforces strategy ownership on sells', () => {
-    const { ledger, risk, close } = fixture(); cleanups.push(close); buy(ledger, 'aggressive-growth', 'NVDA', 4, 100, 'ownership-risk');
+    const { ledger, risk, close } = fixture(); cleanups.push(close); buy(ledger, 'SAFE_LONG_TERM', 'NVDA', 4, 100, 'ownership-risk');
     const decision = risk.evaluate(proposal({ action: 'SELL', orderIntent: { side: 'SELL', quantity: 1, orderType: 'MARKET', timeInForce: 'DAY', assetType: 'EQUITY' } }), risk.defaultContext());
     expect(codes(decision)).toContain('OWNERSHIP_LIMIT');
   });
@@ -82,7 +82,7 @@ describe('RiskEngine deterministic gates', () => {
   });
 
   it('enforces strategy cash reserve and strategy-scoped sector concentration', () => {
-    const { database, risk, close } = fixture(); cleanups.push(close); const strategy = database.getStrategy('day-trader')!;
+    const { database, risk, close } = fixture(); cleanups.push(close); const strategy = database.getStrategy('AGGRESSIVE_STOCKS')!;
     database.updateStrategy(strategy.id, { ...strategy.config, maxPositionPercent: 100, maxSectorExposurePercent: 10 }, 'TEST', 'tester', 'tight sector');
     const decision = risk.evaluate(proposal({ marketPrice: 100, orderIntent: { side: 'BUY', quantity: 91, orderType: 'MARKET', timeInForce: 'DAY', assetType: 'EQUITY' }, requestedCapital: 9_100, sector: 'Technology' }), risk.defaultContext());
     expect(codes(decision)).toEqual(expect.arrayContaining(['STRATEGY_CASH_RESERVE', 'STRATEGY_SECTOR_CONCENTRATION']));
@@ -90,18 +90,18 @@ describe('RiskEngine deterministic gates', () => {
 
   it('enforces strategy drawdown from persisted performance history', () => {
     const { database, risk, close } = fixture(); cleanups.push(close);
-    database.raw.prepare('INSERT INTO performance_snapshots(id,strategy_id,equity,cash,exposure,realized_pnl,unrealized_pnl,drawdown_percent,created_at) VALUES(?,?,?,?,?,?,?,?,?)').run('peak', 'day-trader', 12_000, 12_000, 0, 0, 0, 0, new Date().toISOString());
+    database.raw.prepare('INSERT INTO performance_snapshots(id,strategy_id,equity,cash,exposure,realized_pnl,unrealized_pnl,drawdown_percent,created_at) VALUES(?,?,?,?,?,?,?,?,?)').run('peak', 'AGGRESSIVE_STOCKS', 12_000, 12_000, 0, 0, 0, 0, new Date().toISOString());
     expect(codes(risk.evaluate(proposal(), risk.defaultContext()))).toContain('STRATEGY_MAX_DRAWDOWN');
   });
 
   it('suspends a strategy after the configured consecutive losing trades', () => {
     const { database, ledger, risk, close } = fixture(); cleanups.push(close);
     for (let index = 0; index < 3; index += 1) {
-      const symbol = `T${index}`; buy(ledger, 'day-trader', symbol, 1, 100, `loss-buy-${index}`);
-      const orderId = ledger.createOrder({ idempotencyKey: `loss-sell-${index}`, strategyId: 'day-trader', symbol, side: 'SELL', quantity: 1, orderType: 'MARKET', mode: 'SIMULATION', source: 'TEST' });
+      const symbol = `T${index}`; buy(ledger, 'AGGRESSIVE_STOCKS', symbol, 1, 100, `loss-buy-${index}`);
+      const orderId = ledger.createOrder({ idempotencyKey: `loss-sell-${index}`, strategyId: 'AGGRESSIVE_STOCKS', symbol, side: 'SELL', quantity: 1, orderType: 'MARKET', mode: 'SIMULATION', source: 'TEST' });
       ledger.applyFill({ brokerFillId: `loss-fill-${index}`, orderId, quantity: 1, price: 90, fees: 0, executedAt: new Date(Date.now() + index).toISOString() });
     }
     const decision = risk.evaluate(proposal({ symbol: 'MSFT' }), risk.defaultContext());
-    expect(codes(decision)).toContain('CONSECUTIVE_LOSSES'); expect(database.getStrategy('day-trader')?.enabled).toBe(false);
+    expect(codes(decision)).toContain('CONSECUTIVE_LOSSES'); expect(database.getStrategy('AGGRESSIVE_STOCKS')?.enabled).toBe(false);
   });
 });

@@ -1,10 +1,13 @@
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { chmodSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import { EXAMPLE_GLOBAL_RISK, EXAMPLE_STRATEGY_CONFIGS, STRATEGY_IDS, type AgentStatus, type GlobalRiskConfig, type OperatingMode, type Strategy, type StrategyConfig, type StrategyKind } from '../../core/src/types.js';
-import { diffRecords, makeId, nowIso, parseJson, redact } from '../../core/src/utils.js';
+import { diffRecords, makeId, nowIso, parseJson, redact,roundMoney } from '../../core/src/utils.js';
+import { migrateOwnership, V2_SQL } from './v2-migration.js';
+import { PREPRODUCTION_SQL } from './preproduction-migration.js';
+import { DEFAULT_POLICIES, SLEEVES } from '../../trading-v2/src/model.js';
 
-const MIGRATIONS: Array<{ version: number; sql: string }> = [
+export const MIGRATIONS: Array<{ version: number; sql: string; run?: (db: Database.Database) => void }> = [
   {
     version: 1,
     sql: `
@@ -308,11 +311,13 @@ const MIGRATIONS: Array<{ version: number; sql: string }> = [
       ALTER TABLE orders ADD COLUMN asset_type TEXT NOT NULL DEFAULT 'EQUITY';
     `,
   },
+  { version: 3, sql: V2_SQL, run: migrateOwnership },
+  { version: 4, sql: PREPRODUCTION_SQL },
 ];
 
 interface StrategyRow {
   id: string; name: string; kind: StrategyKind; enabled: number; status: AgentStatus; allocation_amount: number;
-  config_json: string; created_at: string; updated_at: string; cash: number; version: number;
+  config_json: string; created_at: string; updated_at: string; cash: number; version: number; sleeve_kind: StrategyKind | null;
 }
 
 export class AppDatabase {
@@ -330,8 +335,14 @@ export class AppDatabase {
   migrate(): void {
     this.raw.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
     const applied = new Set((this.raw.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: number }>).map((row) => row.version));
-    const apply = this.raw.transaction((migration: { version: number; sql: string }) => {
+    if (this.path !== ':memory:' && applied.size > 0 && MIGRATIONS.some(m => !applied.has(m.version))) {
+      const directory = join(dirname(this.path), 'backups'); mkdirSync(directory, { recursive: true });
+      const backup = join(directory, 'pre-migration-' + Date.now() + '.db');
+      this.raw.prepare('VACUUM INTO ?').run(backup); chmodSync(backup, 0o600);
+    }
+    const apply = this.raw.transaction((migration: { version: number; sql: string; run?: (db: Database.Database) => void }) => {
       this.raw.exec(migration.sql);
+      migration.run?.(this.raw);
       this.raw.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(migration.version, nowIso());
     });
     for (const migration of MIGRATIONS) if (!applied.has(migration.version)) apply(migration);
@@ -356,15 +367,16 @@ export class AppDatabase {
     };
     const seed = this.raw.transaction(() => {
       for (const [key, value] of Object.entries(defaults)) setDefault.run(key, JSON.stringify(value), timestamp);
-      const rows: Array<{ id: string; name: string; kind: StrategyKind }> = [
-        { id: STRATEGY_IDS.dayTrader, name: 'Day Trader', kind: 'DAY_TRADER' },
-        { id: STRATEGY_IDS.aggressiveGrowth, name: 'Aggressive Growth', kind: 'AGGRESSIVE_GROWTH' },
-        { id: STRATEGY_IDS.longTerm, name: 'Long-Term Investor', kind: 'LONG_TERM' },
+      const rows: Array<{ id: string; name: string; kind: 'DAY_TRADER' | 'AGGRESSIVE_GROWTH' | 'LONG_TERM' }> = [
+        { id: STRATEGY_IDS.safe, name: 'SAFE', kind: 'LONG_TERM' },
+        { id: STRATEGY_IDS.aggressive, name: 'AGGRESSIVE', kind: 'AGGRESSIVE_GROWTH' },
+        { id: STRATEGY_IDS.options, name: 'OPTIONS', kind: 'DAY_TRADER' },
       ];
       for (const row of rows) {
-        const config = EXAMPLE_STRATEGY_CONFIGS[row.kind];
-        this.raw.prepare(`INSERT OR IGNORE INTO strategies(id,name,kind,enabled,status,allocation_amount,config_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`)
-          .run(row.id, row.name, row.kind, 1, row.kind === 'DAY_TRADER' ? 'WATCHING' : 'IDLE', config.allocationAmount, JSON.stringify(config), timestamp, timestamp);
+        const capital=this.getSetting<number>('designated_capital',50000),third=roundMoney(capital/3);
+        const config = { ...EXAMPLE_STRATEGY_CONFIGS[row.kind], allocationAmount: row.id==='OPTIONS'?roundMoney(capital-2*third):third, allowedAssetTypes: row.id === 'OPTIONS' ? ['OPTION'] : ['EQUITY','ETF'] };
+        this.raw.prepare(`INSERT OR IGNORE INTO strategies(id,name,kind,enabled,status,allocation_amount,config_json,created_at,updated_at,sleeve_kind) VALUES(?,?,?,?,?,?,?,?,?,?)`)
+          .run(row.id, row.name, row.kind, 1, 'IDLE', config.allocationAmount, JSON.stringify(config), timestamp, timestamp,row.id);
         this.raw.prepare('INSERT OR IGNORE INTO strategy_cash(strategy_id,balance,updated_at) VALUES(?,?,?)').run(row.id, config.allocationAmount, timestamp);
         const hasVersion = this.raw.prepare('SELECT 1 FROM strategy_versions WHERE strategy_id=?').get(row.id);
         if (!hasVersion) {
@@ -372,6 +384,7 @@ export class AppDatabase {
             .run(makeId('sv'), row.id, 1, 'SYSTEM', '{}', JSON.stringify(config), JSON.stringify(config), 'INSTALL', 'EXAMPLE DEFAULTS created at installation; not investment recommendations.', '{}', timestamp);
         }
       }
+      for (const sleeve of SLEEVES) this.raw.prepare('INSERT OR IGNORE INTO sleeve_policies VALUES(?,?,?)').run(sleeve,JSON.stringify(DEFAULT_POLICIES[sleeve]),timestamp);
     });
     seed();
   }
@@ -394,18 +407,21 @@ export class AppDatabase {
   getGlobalRisk(): GlobalRiskConfig { return this.getSetting<GlobalRiskConfig>('global_risk', EXAMPLE_GLOBAL_RISK); }
 
   listStrategies(): Strategy[] {
-    const rows = this.raw.prepare(`SELECT s.*, c.balance AS cash, COALESCE((SELECT MAX(version) FROM strategy_versions v WHERE v.strategy_id=s.id),1) AS version FROM strategies s JOIN strategy_cash c ON c.strategy_id=s.id ORDER BY CASE s.kind WHEN 'DAY_TRADER' THEN 1 WHEN 'AGGRESSIVE_GROWTH' THEN 2 ELSE 3 END`).all() as StrategyRow[];
+    const rows = this.raw.prepare(`SELECT s.*, c.balance AS cash, COALESCE((SELECT MAX(version) FROM strategy_versions v WHERE v.strategy_id=s.id),1) AS version FROM strategies s JOIN strategy_cash c ON c.strategy_id=s.id WHERE s.archived=0 ORDER BY CASE s.sleeve_kind WHEN 'SAFE_LONG_TERM' THEN 1 WHEN 'AGGRESSIVE_STOCKS' THEN 2 ELSE 3 END`).all() as StrategyRow[];
     return rows.map((row) => this.mapStrategy(row));
   }
 
   getStrategy(id: string): Strategy | null {
-    const row = this.raw.prepare(`SELECT s.*, c.balance AS cash, COALESCE((SELECT MAX(version) FROM strategy_versions v WHERE v.strategy_id=s.id),1) AS version FROM strategies s JOIN strategy_cash c ON c.strategy_id=s.id WHERE s.id=?`).get(id) as StrategyRow | undefined;
+    const row = this.raw.prepare(`SELECT s.*, c.balance AS cash, COALESCE((SELECT MAX(version) FROM strategy_versions v WHERE v.strategy_id=s.id),1) AS version FROM strategies s JOIN strategy_cash c ON c.strategy_id=s.id WHERE s.id=? AND s.archived=0`).get(id) as StrategyRow | undefined;
     return row ? this.mapStrategy(row) : null;
   }
 
   updateStrategy(id: string, config: StrategyConfig, source: string, origin: string, reason: string): Strategy {
     const current = this.getStrategy(id);
     if (!current) throw new Error('Strategy not found');
+    if(config.allocationAmount!==current.allocationAmount&&source!=='SETUP')throw new Error('V2 allocation changes must use cash-conserving StrategyAllocationManager, not legacy capital creation');
+    if(id!=='OPTIONS'&&config.allowedAssetTypes.some(a=>a!=='EQUITY'&&a!=='ETF'))throw new Error('Stock sleeves cannot enable options or crypto');
+    if(id==='OPTIONS'&&config.allowedAssetTypes.some(a=>a!=='OPTION'))throw new Error('OPTIONS execution is single-leg Level 2 only');
     const version = current.version + 1;
     const timestamp = nowIso();
     const portfolio = this.raw.prepare('SELECT symbol,quantity,average_cost,market_price FROM strategy_positions WHERE strategy_id=?').all(id);
@@ -434,6 +450,8 @@ export class AppDatabase {
   }
 
   setStrategyEnabled(id: string, enabled: boolean, actor: string, reason: string): void {
+    if(!this.getStrategy(id))throw new Error('Active strategy not found');
+    if(enabled&&(this.raw.prepare('SELECT killed FROM strategy_capital WHERE strategy_id=?').get(id) as {killed:number}|undefined)?.killed)throw new Error('Latched emergency kill requires explicit weekly review/reset');
     const status: AgentStatus = enabled ? 'IDLE' : 'PAUSED';
     const result = this.raw.prepare('UPDATE strategies SET enabled=?,status=?,updated_at=? WHERE id=?').run(enabled ? 1 : 0, status, nowIso(), id);
     if (result.changes !== 1) throw new Error('Strategy not found');
@@ -449,7 +467,7 @@ export class AppDatabase {
 
   private mapStrategy(row: StrategyRow): Strategy {
     return {
-      id: row.id, name: row.name, kind: row.kind, enabled: row.enabled === 1, status: row.status,
+      id: row.id, name: row.name, kind: row.sleeve_kind ?? row.kind, enabled: row.enabled === 1, status: row.status,
       allocationAmount: row.allocation_amount, cash: row.cash, config: parseJson<StrategyConfig>(row.config_json),
       version: row.version, createdAt: row.created_at, updatedAt: row.updated_at,
     };
@@ -458,7 +476,5 @@ export class AppDatabase {
 
 export function openDatabase(path: string): AppDatabase {
   const database = new AppDatabase(path);
-  database.migrate();
-  database.seedFoundation();
-  return database;
+  try{database.migrate();database.seedFoundation();return database;}catch(error){database.close();throw error;}
 }

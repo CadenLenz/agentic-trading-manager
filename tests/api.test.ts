@@ -17,8 +17,13 @@ describe('API authentication and confirmation boundaries', () => {
   });
 
   it('validates first-run allocation totals', async () => {
-    const response = await app.inject({ method: 'POST', url: '/api/setup/complete', payload: { username: 'operator', password: 'very-secure-password', designatedCapital: 1_000, allocations: { 'day-trader': 1_000, 'aggressive-growth': 1_000, 'long-term-investor': 1_000 }, demoData: false } });
+    const response = await app.inject({ method: 'POST', url: '/api/setup/complete', payload: { username: 'operator', password: 'very-secure-password', designatedCapital: 1_000, allocations: { 'AGGRESSIVE_STOCKS': 1_000, 'SAFE_LONG_TERM': 1_000, 'OPTIONS': 1_000 }, demoData: false } });
     expect(response.statusCode).toBe(400); expect(response.json().error).toBe('ALLOCATION_TOTAL');
+  });
+  it('commissioning smaller empty fixture funds does not trigger emergency drawdown',async()=>{
+    const result=await app.inject({method:'POST',url:'/api/setup/complete',payload:{username:'operator',password:'very-secure-password',designatedCapital:5000,allocations:{SAFE_LONG_TERM:1666.67,AGGRESSIVE_STOCKS:1666.67,OPTIONS:1666.66},demoData:false}});
+    expect(result.statusCode).toBe(200);expect(manager.database.getSetting<{netAccountValue:number}>('broker_account_v2',{netAccountValue:0}).netAccountValue).toBe(5000);
+    for(const s of ['SAFE_LONG_TERM','AGGRESSIVE_STOCKS','OPTIONS'] as const)expect(manager.allocation.state(s)).toMatchObject({drawdown:0,killed:false});
   });
 
   it('creates a secure session and enforces CSRF on mutations', async () => {
@@ -28,12 +33,12 @@ describe('API authentication and confirmation boundaries', () => {
   });
 
   it('requires explicit confirmation before a strategy change is committed', async () => {
-    const session = await setupSession(app); const strategy = manager.database.getStrategy('day-trader')!;
-    const proposed = await app.inject({ method: 'POST', url: '/api/strategies/day-trader/change', headers: { cookie: session.cookie, 'x-csrf-token': session.csrf }, payload: { config: { ...strategy.config, maxTradesPerDay: 4 }, reason: 'Test confirmation flow' } });
-    expect(proposed.statusCode).toBe(200); expect(manager.database.getStrategy('day-trader')?.version).toBe(2);
+    const session = await setupSession(app); const strategy = manager.database.getStrategy('AGGRESSIVE_STOCKS')!;
+    const proposed = await app.inject({ method: 'POST', url: '/api/strategies/AGGRESSIVE_STOCKS/change', headers: { cookie: session.cookie, 'x-csrf-token': session.csrf }, payload: { config: { ...strategy.config, maxTradesPerDay: 4 }, reason: 'Test confirmation flow' } });
+    expect(proposed.statusCode).toBe(200); expect(manager.database.getStrategy('AGGRESSIVE_STOCKS')?.version).toBe(2);
     const changeId = proposed.json().change.id as string;
     const confirmed = await app.inject({ method: 'POST', url: `/api/changes/${changeId}/confirm`, headers: { cookie: session.cookie, 'x-csrf-token': session.csrf }, payload: {} });
-    expect(confirmed.statusCode).toBe(200); expect(manager.database.getStrategy('day-trader')?.version).toBe(3); expect(manager.database.getStrategy('day-trader')?.config.maxTradesPerDay).toBe(4);
+    expect(confirmed.statusCode).toBe(200); expect(manager.database.getStrategy('AGGRESSIVE_STOCKS')?.version).toBe(3); expect(manager.database.getStrategy('AGGRESSIVE_STOCKS')?.config.maxTradesPerDay).toBe(4);
   });
 
   it('validates and confirms global hard-risk changes separately', async () => {
@@ -55,11 +60,39 @@ describe('API authentication and confirmation boundaries', () => {
     const response = await app.inject({ method: 'POST', url: '/api/system/mode', headers: { cookie: session.cookie, 'x-csrf-token': session.csrf }, payload: { mode: 'LIVE', confirmation: 'ENABLE LIVE TRADING' } });
     expect(response.statusCode).toBe(409); expect(manager.database.getMode()).toBe('SIMULATION'); expect(manager.database.getSetting('live_db_confirmation')).toBe(false);
   });
+  it('protects V2 resources and agent sessions with authentication and CSRF',async()=>{
+    expect((await app.inject({method:'GET',url:'/api/v2/state'})).statusCode).toBe(401);
+    const s=await setupSession(app),headers={cookie:s.cookie,'x-csrf-token':s.csrf};
+    expect((await app.inject({method:'POST',url:'/api/v2/agent/sessions',headers:{cookie:s.cookie},payload:{mode:'ADVISOR'}})).statusCode).toBe(403);
+    const session=await app.inject({method:'POST',url:'/api/v2/agent/sessions',headers,payload:{mode:'ADVISOR'}});expect(session.statusCode).toBe(200);
+    const state=await app.inject({method:'GET',url:'/api/v2/state',headers});expect(state.json().sleeves).toHaveLength(3);expect(state.json().readiness.ready).toBe(false);
+  });
+  it('STOP remains latched after global pause release and mode changes clear cached funds',async()=>{
+    const s=await setupSession(app),headers={cookie:s.cookie,'x-csrf-token':s.csrf};
+    await app.inject({method:'POST',url:'/api/system/emergency-stop',headers,payload:{}});
+    expect(manager.notifications.list()).toEqual(expect.arrayContaining([expect.objectContaining({kind:'STOP',severity:'CRITICAL'})]));
+    await app.inject({method:'POST',url:'/api/system/pause',headers,payload:{paused:false}});
+    expect(manager.database.getSetting('stopped')).toBe(true);expect(manager.database.getSetting('v2_live_activation')).toBe(false);
+    expect((await app.inject({method:'POST',url:'/api/system/mode',headers,payload:{mode:'READ_ONLY'}})).statusCode).toBe(200);
+    expect(manager.database.getSetting('broker_account_v2')).toBeNull();expect(manager.database.getSetting('reconciliation_clear')).toBe(false);
+  });
+  it('requires session-specific reauthentication for major policy changes',async()=>{
+    await setupSession(app);
+    const login=await app.inject({method:'POST',url:'/api/auth/login',payload:{username:'operator',password:'very-secure-password'}});
+    const cookies=login.headers['set-cookie'],raw=Array.isArray(cookies)?cookies[0]:cookies;
+    const headers={cookie:raw!.split(';')[0]!,'x-csrf-token':login.json().csrf as string};
+    const payload={policy:manager.allocation.policy('SAFE_LONG_TERM'),confirmation:'UPDATE SAFE_LONG_TERM POLICY',review:'Reviewed this exact independent sleeve policy'};
+    expect((await app.inject({method:'POST',url:'/api/v2/sleeves/SAFE_LONG_TERM/policy',headers,payload})).statusCode).toBe(403);
+    expect((await app.inject({method:'POST',url:'/api/v2/reauth',headers,payload:{password:'very-secure-password'}})).statusCode).toBe(200);
+    expect((await app.inject({method:'POST',url:'/api/v2/sleeves/SAFE_LONG_TERM/policy',headers,payload})).statusCode).toBe(200);
+  });
 });
 
 async function setupSession(app: FastifyInstance): Promise<{ cookie: string; csrf: string }> {
-  const response = await app.inject({ method: 'POST', url: '/api/setup/complete', payload: { username: 'operator', password: 'very-secure-password', designatedCapital: 50_000, allocations: { 'day-trader': 10_000, 'aggressive-growth': 15_000, 'long-term-investor': 25_000 }, demoData: false } });
+  const response = await app.inject({ method: 'POST', url: '/api/setup/complete', payload: { username: 'operator', password: 'very-secure-password', designatedCapital: 50_000, allocations: { 'AGGRESSIVE_STOCKS': 10_000, 'SAFE_LONG_TERM': 15_000, 'OPTIONS': 25_000 }, demoData: false } });
   expect(response.statusCode).toBe(200);
   const setCookie = response.headers['set-cookie']; const raw = Array.isArray(setCookie) ? setCookie[0] : setCookie; if (!raw) throw new Error('Session cookie missing');
-  return { cookie: raw.split(';')[0]!, csrf: response.json().csrf as string };
+  const session={ cookie: raw.split(';')[0]!, csrf: response.json().csrf as string };
+  expect((await app.inject({method:'POST',url:'/api/v2/reauth',headers:{cookie:session.cookie,'x-csrf-token':session.csrf},payload:{password:'very-secure-password'}})).statusCode).toBe(200);
+  return session;
 }

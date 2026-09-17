@@ -1,0 +1,85 @@
+import {readFileSync,writeFileSync,existsSync,mkdirSync,chmodSync} from 'node:fs';
+import {dirname,join} from 'node:path';
+import {createCipheriv,createDecipheriv,createHash,randomBytes} from 'node:crypto';
+import {Client} from '@modelcontextprotocol/sdk/client/index.js';
+import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import type {Transport} from '@modelcontextprotocol/sdk/shared/transport.js';
+import type {OAuthClientProvider} from '@modelcontextprotocol/sdk/client/auth.js';
+import type {OAuthTokens,OAuthClientInformationMixed,OAuthClientMetadata} from '@modelcontextprotocol/sdk/shared/auth.js';
+import {Ajv} from 'ajv';
+import {z} from 'zod';
+import type {AppDatabase} from '../../database/src/database.js';
+import {nowIso} from '../../core/src/utils.js';
+import {OpenAICredentialVault} from './credential-vault.js';
+import {hasOpenAIModelEvidence,openaiCredentialFingerprint} from './connector-evidence.js';
+
+export type ConnectorState='CONNECTED'|'DISCONNECTED'|'ERROR'|'AUTH_EXPIRED'|'READ_ONLY'|'LIVE_CAPABLE';
+export interface ConnectorStatus{id:string;state:ConnectorState;configured:boolean;lastSuccess:string|null;lastError:string|null;details:Record<string,unknown>}
+const endpoint=new URL('https://agent.robinhood.com/mcp/trading');
+// Names come from the currently available official Robinhood catalog. Discovery validates their actual schemas.
+export const READ_TOOLS=new Set(['get_accounts','get_portfolio','get_equity_positions','get_option_positions','get_equity_orders','get_option_orders','get_equity_tax_lots','get_equity_quotes','get_option_quotes','get_option_instruments','get_option_chains','get_equity_fundamentals','get_equity_news','get_financials','get_earnings_results','get_earnings_calendar','get_equity_technical_indicators','get_equity_historicals','get_option_historicals','get_equity_tradability','get_realized_pnl','get_pnl_trade_history']);
+const PREVIEWS=new Set(['review_equity_order','review_option_order']);
+/** Encrypted, server-only OAuth state; not a Codex token export or a recreated brokerage login. */
+class ServerOAuth implements OAuthClientProvider{
+  authorizationUrl:string|null=null;stateValue='';actor='';expires=0;
+  private data:{tokens?:OAuthTokens;client?:OAuthClientInformationMixed;verifier?:string}={};
+  constructor(readonly path:string,readonly secret:string,readonly redirectUrl:string){
+    if(existsSync(path)){const envelope=JSON.parse(readFileSync(path,'utf8')) as {iv:string;tag:string;body:string};const decipher=createDecipheriv('aes-256-gcm',this.key(),Buffer.from(envelope.iv,'hex'));decipher.setAuthTag(Buffer.from(envelope.tag,'hex'));this.data=JSON.parse(Buffer.concat([decipher.update(Buffer.from(envelope.body,'hex')),decipher.final()]).toString());}
+  }
+  private key(){return createHash('sha256').update(this.secret+'|robinhood-oauth').digest();}
+  private save(){mkdirSync(dirname(this.path),{recursive:true,mode:0o700});const iv=randomBytes(12),cipher=createCipheriv('aes-256-gcm',this.key(),iv),body=Buffer.concat([cipher.update(JSON.stringify(this.data)),cipher.final()]);writeFileSync(this.path,JSON.stringify({iv:iv.toString('hex'),tag:cipher.getAuthTag().toString('hex'),body:body.toString('hex')}),{mode:0o600});chmodSync(this.path,0o600);}
+  get clientMetadata():OAuthClientMetadata{return {client_name:'Agentic Trading Manager',redirect_uris:[this.redirectUrl],grant_types:['authorization_code','refresh_token'],response_types:['code'],token_endpoint_auth_method:'none'};}
+  state(){return this.stateValue;}
+  clientInformation(){return this.data.client;}
+  saveClientInformation(client:OAuthClientInformationMixed){this.data.client=client;this.save();}
+  tokens(){return this.data.tokens;}
+  saveTokens(tokens:OAuthTokens){this.data.tokens=tokens;this.save();}
+  saveCodeVerifier(verifier:string){this.data.verifier=verifier;this.save();}
+  codeVerifier(){if(!this.data.verifier)throw new Error('OAuth PKCE verifier missing');return this.data.verifier;}
+  redirectToAuthorization(url:URL){if(url.protocol!=='https:')throw new Error('Insecure authorization URL rejected');this.authorizationUrl=url.toString();}
+  invalidateCredentials(scope:'all'|'client'|'tokens'|'verifier'|'discovery'){if(scope==='all')this.data={};if(scope==='client')delete this.data.client;if(scope==='tokens')delete this.data.tokens;if(scope==='verifier')delete this.data.verifier;this.save();}
+}
+export class OfficialRobinhoodConnection{
+  private client:Client|null=null;private transport:StreamableHTTPClientTransport|null=null;private oauth:ServerOAuth|null=null;
+  private tools=new Map<string,{inputSchema:Record<string,unknown>;outputSchema:Record<string,unknown>|undefined;description:string|undefined}>();
+  private accountValidation:{accountId:string;at:number}|null=null;
+  constructor(readonly db:AppDatabase,readonly directory:string,readonly secret:string){const old=this.db.raw.prepare('SELECT body_json FROM connector_status WHERE id=?').get('ROBINHOOD') as {body_json:string}|undefined;if(old){const s=JSON.parse(old.body_json);s.state='DISCONNECTED';s.details={...s.details,readValidated:false,reconnectRequired:true};this.db.raw.prepare('UPDATE connector_status SET body_json=?,updated_at=? WHERE id=?').run(JSON.stringify(s),nowIso(),'ROBINHOOD');}}
+  private provider(){if(!this.oauth){const origin=process.env.PRIVATE_UI_URL??process.env.WEB_ORIGIN??'http://localhost:4010';const url=new URL(origin);if(url.protocol!=='https:'&&!['localhost','127.0.0.1'].includes(url.hostname))throw new Error('OAuth callback requires private HTTPS');this.oauth=new ServerOAuth(join(this.directory,'robinhood-oauth.enc'),this.secret,url.origin+'/api/v2/connections/robinhood/callback');}return this.oauth;}
+  async connect(actor:string){const p=this.provider();if(p.expires>Date.now()&&p.actor!==actor)throw new Error('Another operator owns the active OAuth flow');p.actor=actor;p.stateValue=randomBytes(24).toString('base64url');p.expires=Date.now()+600000;p.authorizationUrl=null;
+    this.transport=new StreamableHTTPClientTransport(endpoint,{authProvider:p,reconnectionOptions:{maxRetries:0,maxReconnectionDelay:1000,initialReconnectionDelay:1000,reconnectionDelayGrowFactor:1}});
+    this.client=new Client({name:'agentic-trading-manager',version:'2.1.0'},{capabilities:{}});
+    // SDK declarations have an exactOptionalPropertyTypes sessionId mismatch; runtime transport is the documented SDK class.
+    try{await this.client.connect(this.transport as unknown as Transport,{timeout:15000});return await this.discover();}catch(error){if(p.authorizationUrl)return {authorizationUrl:p.authorizationUrl,state:'DISCONNECTED',requiresUserLogin:true};this.client=null;this.status('ERROR','Official MCP connection failed');throw error;}
+  }
+  async callback(actor:string,state:string,code:string){const p=this.provider();if(!state||state!==p.stateValue||p.actor!==actor||p.expires<Date.now()||!this.transport)throw new Error('OAuth state/session expired or invalid');p.stateValue='';p.expires=0;await this.transport.finishAuth(code);return this.connect(actor);}
+  async finishCallback(state:string,code:string){return this.callback(this.provider().actor,state,code);}
+  async discover(){if(!this.client)throw new Error('MCP is disconnected');this.accountValidation=null;let cursor:string|undefined;let pages=0;this.tools.clear();do{const response=await this.client.listTools(cursor?{cursor}:{});for(const tool of response.tools)this.tools.set(tool.name,{inputSchema:tool.inputSchema,outputSchema:tool.outputSchema,description:tool.description});cursor=response.nextCursor;if(++pages>20)throw new Error('MCP catalog pagination exceeded');}while(cursor);
+    this.db.setSetting('official_mcp_catalog_hash',createHash('sha256').update(JSON.stringify(this.catalog().map(t=>({name:t.name,inputSchema:t.inputSchema,outputSchema:t.outputSchema})).sort((a,b)=>a.name.localeCompare(b.name)))).digest('hex'));
+    const names=[...this.tools.keys()],reads=names.filter(n=>READ_TOOLS.has(n)),previews=names.filter(n=>PREVIEWS.has(n));this.status('CONNECTED',null,{reads,previews,readValidated:false,placementEnabled:false,accountScope:process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID??null});return {state:'CONNECTED',reads,previews,placementEnabled:false};
+  }
+  catalog(){return [...this.tools].map(([name,schema])=>({name,...schema,allowed:READ_TOOLS.has(name)||PREVIEWS.has(name)}));}
+  async call(name:string,args:Record<string,unknown>,previewConfirmed=false){if(!READ_TOOLS.has(name)&&!(PREVIEWS.has(name)&&previewConfirmed))throw new Error('MCP operation is not read-only/confirmed preview; placement disabled in pre-production');
+    if(!this.client)throw new Error('Connect Robinhood first');const tool=this.tools.get(name);if(!tool)throw new Error('Official capability not discovered');const validate=new Ajv({strict:false,allErrors:true}).compile(tool.inputSchema);if(!validate(args))throw new Error('Arguments do not match discovered official MCP schema');
+    const account=process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID;if(name!=='get_accounts'&&name!=='get_equity_news'&&Object.keys(args).some(k=>/account/i.test(k)&&args[k]!==account))throw new Error('Broker account scope mismatch');
+    try{const result=await this.client.callTool({name,arguments:args},undefined,{timeout:20000});if(result.isError)throw new Error('Official MCP read/preview returned an error');const structured=result.structuredContent;if(tool.outputSchema&&structured&&!new Ajv({strict:false}).compile(tool.outputSchema)(structured))throw new Error('MCP output contract mismatch');const validated=!!this.accountValidation&&this.accountValidation.accountId===account&&Date.now()-this.accountValidation.at<120000;this.status(validated?'READ_ONLY':'CONNECTED',null,{lastTool:name,readValidated:validated,placementEnabled:false});return result;}catch(error){this.accountValidation=null;this.status('ERROR','MCP read/preview failed');this.db.setSetting('reconciliation_clear',false);this.db.setSetting('global_pause',true);throw error;}
+  }
+  private status(state:ConnectorState,error:string|null,details:Record<string,unknown>={}){const body:ConnectorStatus={id:'ROBINHOOD',state,configured:!!this.oauth?.tokens(),lastSuccess:error?null:nowIso(),lastError:error,details};this.db.raw.prepare('INSERT INTO connector_status VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body_json=excluded.body_json,updated_at=excluded.updated_at').run('ROBINHOOD',JSON.stringify(body),nowIso());this.db.audit('CONNECTORS','CONNECTOR_STATUS','connector','ROBINHOOD',{state,error});}
+  validateAccount(accountId:string){if(accountId!==process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID)throw new Error('Wrong scoped account');this.accountValidation={accountId,at:Date.now()};this.status('READ_ONLY',null,{accountScope:accountId,readValidated:true,placementEnabled:false});}
+  async close(){await this.client?.close();this.client=null;}
+}
+export class ConnectorService{
+  readonly robinhood:OfficialRobinhoodConnection;
+  private readonly openaiVault:OpenAICredentialVault;
+  constructor(readonly db:AppDatabase,directory:string,secret:string){this.robinhood=new OfficialRobinhoodConnection(db,directory,secret);this.openaiVault=new OpenAICredentialVault(join(directory,'openai-credential.enc'),secret);if(!process.env.OPENAI_API_KEY){const saved=this.openaiVault.read();if(saved){process.env.OPENAI_API_KEY=saved.openaiKey;process.env.OPENAI_MODEL=process.env.OPENAI_MODEL??saved.openaiModel;}}}
+  configureOpenAI(key:string,model:string,actor:string){if(process.env.NODE_ENV==='production'&&!process.env.PRIVATE_UI_URL?.startsWith('https://'))throw new Error('Configure private HTTPS before credential setup');this.openaiVault.save({openaiKey:key,openaiModel:model});process.env.OPENAI_API_KEY=key;process.env.OPENAI_MODEL=model;this.db.raw.prepare('DELETE FROM connector_status WHERE id=?').run('OPENAI');this.db.setSetting('pi_acceptance_evidence',null);this.db.audit(actor,'OPENAI_CREDENTIAL_CONFIGURED','connector','OPENAI',{model,credential:'ENCRYPTED_SERVER_ONLY',tested:false});return {configured:true,tested:false,paidCalls:0};}
+  list(){const statuses=(this.db.raw.prepare('SELECT body_json FROM connector_status').all() as Array<{body_json:string}>).map(r=>JSON.parse(r.body_json) as ConnectorStatus);return ['OPENAI','ROBINHOOD','SMS','NETWORK'].map(id=>{
+    const configured=id==='OPENAI'?!!process.env.OPENAI_API_KEY:id==='SMS'?!!process.env.TWILIO_ACCOUNT_SID&&!!process.env.TWILIO_AUTH_TOKEN&&!!process.env.TWILIO_FROM_NUMBER&&!!process.env.SMS_TO_NUMBER:id==='NETWORK'?(process.env.BIND_HOST??'127.0.0.1')==='127.0.0.1':statuses.find(s=>s.id===id)?.configured??false;
+    const previous=statuses.find(s=>s.id===id);if(id==='OPENAI'&&previous?.state==='CONNECTED'&&!hasOpenAIModelEvidence(this.db))return {...previous,state:'DISCONNECTED' as const,configured,details:{...previous.details,retestRequired:true}};
+      return previous??{id,state:'DISCONNECTED',configured,lastSuccess:null,lastError:null,details:id==='OPENAI'?{setup:'Server-side OPENAI_API_KEY; no invented ChatGPT login',model:process.env.OPENAI_MODEL??'gpt-5.5'}:id==='NETWORK'?{bind:process.env.BIND_HOST??'127.0.0.1',privateUrl:process.env.PRIVATE_UI_URL??null,expectedProxy:'TAILSCALE_SERVE',funnelAllowed:false}:{setup:'Server-side credentials; untested'}};
+  });}
+  async testOpenAI(){if(!process.env.OPENAI_API_KEY)throw new Error('Set OPENAI_API_KEY in the protected Pi environment');const model=process.env.OPENAI_MODEL??'gpt-5.5';let state:ConnectorState='ERROR',error:string|null='Model access request failed or timed out';try{const response=await fetch('https://api.openai.com/v1/models/'+encodeURIComponent(model),{headers:{Authorization:'Bearer '+process.env.OPENAI_API_KEY},signal:AbortSignal.timeout(15000)});if(response.ok){const metadata=await response.json() as {id?:string};if(metadata.id===model){state='CONNECTED';error=null;}else error='Model metadata identity mismatch';}else{state=response.status===401?'AUTH_EXPIRED':'ERROR';error='Model access HTTP '+response.status;}}catch{/* Persist generic error without credentials or provider payloads. */}
+    const status:ConnectorStatus={id:'OPENAI',state,configured:true,lastSuccess:state==='CONNECTED'?nowIso():null,lastError:error,details:{model,modelAvailable:state==='CONNECTED',agentConnectivity:'No paid Responses call performed',lastSuccessfulAgentCall:this.db.getSetting('openai_last_success',null)}};
+    this.db.raw.prepare('INSERT INTO connector_status VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body_json=excluded.body_json,updated_at=excluded.updated_at').run(status.id,JSON.stringify(status),nowIso());this.db.setSetting('openai_verified_fingerprint',state==='CONNECTED'?openaiCredentialFingerprint():null);return status;
+  }
+}
+export const connectorReadSchema=z.object({tool:z.string().min(1),arguments:z.record(z.string(),z.unknown())}).strict();

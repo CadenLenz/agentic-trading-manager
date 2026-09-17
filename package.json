@@ -1,14 +1,17 @@
 {
   "name": "agentic-trading-manager",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
+  "overrides": { "esbuild": "0.28.2" },
   "type": "module",
   "description": "Simulation-first autonomous multi-strategy trading control plane for Raspberry Pi.",
-  "engines": { "node": ">=22.13.0" },
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
     "dev": "concurrently -k -n API,WEB -c blue,green \"npm:dev:api\" \"npm:dev:web\"",
     "dev:web": "vite --host 127.0.0.1",
-    "dev:api": "tsx watch apps/api/src/index.ts",
+    "dev:api": "node --watch --import tsx apps/api/src/index.ts",
     "build": "npm run build:web && npm run build:api",
     "build:web": "vite build",
     "build:api": "tsup apps/api/src/index.ts --format esm --platform node --target node22 --out-dir dist/api --clean --sourcemap",
@@ -19,6 +22,10 @@
     "test:watch": "vitest",
     "migrate": "tsx scripts/migrate.ts",
     "backup": "tsx scripts/backup.ts",
+    "self-test": "tsx scripts/self-test.ts",
+    "test:system": "tsx scripts/full-system-test.ts",
+    "pi:acceptance": "tsx scripts/pi-acceptance.ts",
+    "upgrade:safe": "tsx scripts/upgrade-safe.ts",
     "security:audit": "npm audit --omit=dev"
   },
   "dependencies": {
@@ -26,6 +33,8 @@
     "@fastify/cors": "^11.1.0",
     "@fastify/rate-limit": "^10.3.0",
     "@fastify/static": "^10.1.3",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ajv": "^8.20.0",
     "better-sqlite3": "^12.2.0",
     "fastify": "^5.6.1",
     "lucide-react": "^0.468.0",
@@ -43,11 +52,11 @@
     "@vitejs/plugin-react": "^6.0.2",
     "concurrently": "^9.2.1",
     "eslint": "^9.39.4",
-    "tsx": "^4.20.6",
     "tsup": "^8.5.0",
+    "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.2",
     "vite": "^8.0.13",
-    "vitest": "^3.2.4"
+    "vitest": "^4.1.11"
   }
 }

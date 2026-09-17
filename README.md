@@ -1,125 +1,67 @@
-# Agentic Trading Manager
+# Agentic Trading Manager V2
 
-Agentic Trading Manager is a simulation-first, always-on control plane for a Raspberry Pi 4. It divides one Robinhood Agentic Account into independently owned virtual strategy portfolios while keeping deterministic application code—not an LLM—in charge of authorization, hard risk, execution mode, and emergency controls.
+An in-place update to the Raspberry Pi trading control plane: React/Vite, Fastify, SQLite/WAL, attributed FIFO ledger, persisted proposals, deterministic risk, local reports/scheduling and persistent OpenAI app-tool chat.
 
-> This software does not provide investment advice and makes no claim of profitability. Example defaults and seeded performance are clearly labeled simulation data.
+**Current status: approved pre-production commissioning candidate, simulation-validated; not production LIVE-ready or fully feature-complete. DO NOT ENABLE LIVE YET.** Placement and LIVE activation are locked in code, even with environment flags. Publication does not constitute Pi, connector, account, preview, or LIVE acceptance.
 
-## Implemented architecture
+The Control Room now includes one-click isolated **RUN FULL SYSTEM TEST**, versioned inherited risk settings/history, account/sleeve/position charts, options lifecycle telemetry, notifications, official MCP OAuth/discovery, connections, Pi acceptance and explicit readiness stages. See the [current implementation report](docs/PREPRODUCTION_REPORT.md) for executed verification, exact limitations and the final-pass checklist.
 
-```text
-React + Vite control room
-          │ authenticated JSON API + SSE
-          ▼
-Fastify / AgenticManager
-  ├─ Scheduler + persisted job queue + EventBus + WatcherEngine
-  ├─ AgentOrchestrator ── controlled CodexRunner
-  ├─ Strategy versions + expiring directives + watchlists
-  ├─ VirtualPortfolioLedger ── SQLite WAL transactions
-  ├─ deterministic RiskEngine ── hard gates
-  ├─ ExecutionEngine ── SimulationBroker / RobinhoodMcpAdapter
-  ├─ ReconciliationEngine ── halt on meaningful mismatch
-  └─ audit, health, performance, daily briefs
-                                │
-                                ▼
-                   official Robinhood Trading MCP
-```
+Run `npm ci`, `npm test`, `npm run self-test`, `npm run test:system`, `npm run lint`, `npm run typecheck`, `npm run build`. The full-system CLI writes a retained temporary database and `simulation-report.json`; it does not open your application ledger or call a real broker/model. In the UI, the main button immediately starts a dedicated fixture session. See [Simulation](docs/SIMULATION.md), [Options](docs/OPTIONS.md), [Notifications](docs/NOTIFICATIONS.md), [Tailscale](docs/TAILSCALE.md) and [Production readiness](docs/PRODUCTION_READINESS.md).
 
-The initial logical agents are Day Trader, Aggressive Growth, and Long-Term Investor. Two strategies can own the same symbol without losing attribution; a sell can consume only the initiating strategy's FIFO lots. The dashboard also exposes confirmed global-risk editing, configurable scanner shortlists, daily briefs, strategy version restoration, and audited manual reconciliation attribution.
+Exactly three active sleeves:
 
-## Requirements
+| Sleeve | Default target | Execution assets |
+| --- | --- | --- |
+| SAFE_LONG_TERM | One third of account NAV | Long US stocks/ETFs; low turnover |
+| AGGRESSIVE_STOCKS | One third of account NAV | Long US stocks/ETFs; intraday to short-term |
+| OPTIONS | One third of account NAV | Single-leg Level 2 longs, covered calls, cash-secured puts |
 
-- Node.js 22.13 or newer (Node 22/24 LTS, ARM64 supported)
-- npm 10 or newer
-- Git
-- Codex CLI for optional agent reasoning and Robinhood MCP access
-- Raspberry Pi OS Lite 64-bit for the production target
+Targets use total net account value, never buying power. Weekly allocation transfers free cash outside tolerance bands and never forces sales. Options collateral/share ownership is sleeve-specific. 60% drawdown is a latched emergency backstop; much tighter normal and inherited risk controls apply first. All policies default to manual approval.
 
-For continuous Pi operation, use a quality PSU, Ethernet, 4 GB+ RAM, and a USB SSD rather than a low-end microSD card.
+The application owns risk and execution. AgentChat offers only 18 typed application tools, persists conversations/actions and never exposes raw DB, broker, OS or approval tools.
 
-## Development quick start
+## Development
+
+Node >=22.13, npm and Git are required. On Pi use 64-bit ARM64 Raspberry Pi OS with a USB SSD.
 
 ```bash
-git clone https://github.com/CadenLenz/agentic-trading-manager.git
-cd agentic-trading-manager
+npm ci
 cp .env.example .env
-npm install
-npm run migrate
-npm run dev
-```
-
-Open `http://localhost:3000`, complete the wizard, and retain `TRADING_MODE=SIMULATION` plus `ALLOW_LIVE_TRADING=false`.
-
-Windows PowerShell equivalent:
-
-```powershell
-Copy-Item .env.example .env
-npm install
-npm run migrate
-npm run dev
-```
-
-## Validation
-
-```bash
+# Set a random SESSION_SECRET. Optional OpenAI key stays in .env, never source control/chat.
 npm run lint
 npm run typecheck
 npm test
+npm run self-test
 npm run build
 npm audit --omit=dev
+npm run dev
 ```
 
-Production serves the built dashboard and API from one process:
+Windows PowerShell: Copy-Item .env.example .env instead of cp. Vite binds 127.0.0.1:3000; API 127.0.0.1:4010. First-run funds are labeled Simulation examples, not Robinhood balances. Without OPENAI_API_KEY, chat explicitly runs offline while retaining messages. Research tools attach supplied checklist evidence; they do not fetch or verify current news.
+
+## Upgrade safety
+
+Existing file databases receive an automatic pre-migration backup. Migration 3 archives original strategy records/history, moves Long-Term ownership to SAFE and Day/Growth ownership to AGGRESSIVE, starts OPTIONS empty, expires old pending changes, revokes LIVE and leaves trading paused. Internal ownership transfers require explicit review and cannot move shares reserved for covered calls.
 
 ```bash
-npm run build
-npm start
+npm run backup
+npm run upgrade:safe
 ```
 
-The API binds to `127.0.0.1:4010` by default. Use Tailscale for remote access rather than public port forwarding.
+Stop service/backup writers before operating on a production DB. backup never triggers migrations first. upgrade:safe applies migrations and saves Read Only/paused/manual posture. Do not run an old binary against a migrated DB; restore a matched revision and backup together.
 
-## Operating modes
+## Deployment, API and acceptance
 
-- `SIMULATION`: internal fills only; Robinhood is optional.
-- `READ_ONLY`: official Robinhood reads and reconciliation; all placement is blocked.
-- `LIVE`: requires `TRADING_MODE=LIVE`, `ALLOW_LIVE_TRADING=true`, exact UI confirmation, clear reconciliation, trading-eligible market data, and authenticated MCP capability discovery.
+- [Implementation report and remaining requested work](docs/IMPLEMENTATION_V2.md)
+- [Architecture and schema](docs/ARCHITECTURE_V2.md)
+- [Deterministic risk](docs/RISK_ENGINE.md)
+- [Agent tools, modes and separate sleeve autonomy](docs/AGENT.md)
+- [Official MCP boundary and LIVE prerequisites](docs/ROBINHOOD_MCP.md)
+- [Exact GitHub → Pi installation/update commands](docs/PI_DEPLOYMENT.md)
+- [Operations](docs/OPERATIONS.md), [security](docs/SECURITY.md), [backups](docs/BACKUPS.md), [recovery](docs/RECOVERY.md)
 
-Emergency stop revokes the database LIVE confirmation. No installation defaults to LIVE.
+Pi scripts stage a reviewed published commit/tag and run validation before swapping releases; updates back up before migrations and never auto-enable LIVE/autonomy. Install only the exact commissioning SHA reported for a reviewed release. Physical Pi/systemd/HTTPS/rollback testing must be recorded separately and is never inferred from publication.
 
-## Robinhood MCP
+V1 architecture/agent/setup documents remain as historical context, but their old brokerage execution guidance is superseded by V2.
 
-```bash
-codex mcp add robinhood-trading --url https://agent.robinhood.com/mcp/trading
-```
-
-Then launch Codex, enter `/mcp`, select `robinhood-trading`, and complete the Robinhood desktop OAuth/onboarding flow. Do not automate credentials. See [Robinhood setup](docs/ROBINHOOD_SETUP.md).
-
-## Repository map
-
-```text
-apps/api/                 Fastify API and production entry point
-src/                      React control room and setup wizard
-packages/core/            canonical types, manager, EventBus
-packages/database/        SQLite migrations and strategy versions
-packages/ledger/          virtual cash, lots, fills, realized P/L
-packages/risk/            deterministic global/strategy/directive gates
-packages/execution/       simulation and execution pipeline
-packages/agents/          Codex harness, queue, orchestrator, manager chat
-packages/robinhood/       official MCP adapter boundary
-packages/reconciliation/  broker/internal comparison and resolution
-packages/market-data/     provider abstraction and watcher
-scripts/                  migration and online backup utilities
-systemd/                  service, backup unit/timer, journal policy
-tests/                    ledger, risk, API, versioning, recovery tests
-docs/                     architecture, deployment, security, operations
-```
-
-## Read next
-
-1. [Architecture](docs/ARCHITECTURE.md)
-2. [Risk engine](docs/RISK_ENGINE.md)
-3. [Virtual ledger](docs/VIRTUAL_LEDGER.md)
-4. [Development](docs/DEVELOPMENT.md)
-5. [Pi setup](docs/PI_SETUP.md)
-6. [Operations](docs/OPERATIONS.md)
-
-Robinhood integration and any order placement must use the official Trading MCP. Unofficial scraping, private endpoints, browser automation, and credential capture are out of scope and prohibited by design.
+This is not investment advice, a profitability claim or an invitation to bypass safety gates.

@@ -19,6 +19,7 @@ export class AgentOrchestrator {
   constructor(private readonly database: AppDatabase, private readonly market: MarketDataProvider, private readonly runner: CodexRunner, private readonly workingDirectory: string) {}
 
   async analyze(strategyId: string, symbol: string, useCodex: boolean): Promise<{ decisionId: string; proposal: TradeProposal; rationale: string; simulatedReasoning: boolean }> {
+    if(useCodex)throw new Error('V2 disables the ambient Codex tool surface for trading analysis. Use the persistent OpenAI app-tool agent.');
     const strategy = this.database.getStrategy(strategyId);
     if (!strategy) throw new Error('Strategy not found');
     const normalized = symbol.toUpperCase();

@@ -14,6 +14,8 @@ export class ExecutionEngine {
 
   async execute(input: unknown, idempotencyKey: string, actor = 'AGENT_MANAGER'): Promise<ExecutionResult> {
     const proposal = tradeProposalSchema.parse(input) as TradeProposal;
+    if(this.database.getSetting('stopped',false))throw new Error('STOP latch blocks execution');
+    if(this.database.getMode()!=='SIMULATION'||proposal.orderIntent?.assetType==='OPTION'||proposal.strategyId==='OPTIONS')throw new Error('Legacy execution is Simulation equity-only. Use the V2 proposal lifecycle.');
     const existing = this.database.raw.prepare('SELECT id,status FROM orders WHERE idempotency_key=?').get(idempotencyKey) as { id: string; status: string } | undefined;
     if (existing) return { orderId: existing.id, status: existing.status, proposal, risk: { approved: existing.status !== 'REJECTED', violations: [], evaluatedAt: nowIso() } };
     const riskDecision = this.risk.evaluate(proposal, this.risk.defaultContext());

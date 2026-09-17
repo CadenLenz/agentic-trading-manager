@@ -107,7 +107,7 @@ export class VirtualPortfolioLedger {
     if (strategyId) { clauses.push('strategy_id=?'); parameters.push(strategyId); }
     if (since) { clauses.push('created_at>=?'); parameters.push(since); }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-    const row = this.database.raw.prepare(`SELECT COALESCE(SUM(amount),0) AS total FROM realized_pnl ${where}`).get(...parameters) as { total: number };
+    const row = this.database.raw.prepare(`SELECT COALESCE(SUM(amount),0) AS total FROM (SELECT strategy_id,amount,created_at FROM realized_pnl UNION ALL SELECT strategy_id,amount,created_at FROM economic_event_pnl) ${where}`).get(...parameters) as { total: number };
     return roundMoney(row.total);
   }
 
@@ -171,7 +171,7 @@ export class VirtualPortfolioLedger {
       const consumed = Math.min(remaining, lot.remaining_quantity);
       const feeShare = lot.remaining_quantity > 0 ? lot.fees * (consumed / lot.remaining_quantity) : 0;
       costBasis += consumed * lot.entry_price + feeShare;
-      sqlite.prepare('UPDATE strategy_lots SET remaining_quantity=? WHERE id=?').run(roundQuantity(lot.remaining_quantity - consumed), lot.id);
+      sqlite.prepare('UPDATE strategy_lots SET remaining_quantity=?,fees=fees-? WHERE id=?').run(roundQuantity(lot.remaining_quantity - consumed), feeShare, lot.id);
       remaining = roundQuantity(remaining - consumed);
     }
     if (remaining > 0.000001) throw new Error('Lot accounting is inconsistent with strategy position');

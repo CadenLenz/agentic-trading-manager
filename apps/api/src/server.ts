@@ -9,6 +9,11 @@ import { z, ZodError } from 'zod';
 import { directiveSchema, globalRiskConfigSchema, managerMessageSchema, operatingModeSchema, setupSchema, strategyConfigSchema, tradeProposalSchema } from '../../../packages/core/src/schemas.js';
 import type { AgenticManager } from '../../../packages/core/src/agentic-manager.js';
 import { makeId, nowIso, parseJson, roundMoney } from '../../../packages/core/src/utils.js';
+import {registerV2,readiness} from './v2-routes.js';
+import {sleeveSchema} from '../../../packages/trading-v2/src/model.js';
+import {registerPreproduction,requireRecentAuth} from './preproduction-routes.js';
+import {PREPRODUCTION_LIVE_LOCK} from '../../../packages/trading-v2/src/readiness.js';
+import {notificationPreferencesSchema} from '../../../packages/trading-v2/src/notifications.js';
 
 declare module 'fastify' {
   interface FastifyRequest { authUser: { id: string; username: string; csrf: string } | null }
@@ -17,13 +22,13 @@ declare module 'fastify' {
 const SESSION_COOKIE = 'atm_session';
 const loginSchema = z.object({ username: z.string().min(1).max(64), password: z.string().min(1).max(200) });
 const symbolSchema = z.string().trim().toUpperCase().regex(/^[A-Z][A-Z0-9.-]{0,9}$/);
-const publicPaths = new Set(['/health', '/api/setup/status', '/api/setup/complete', '/api/auth/login']);
+const publicPaths = new Set(['/health', '/api/setup/status', '/api/setup/complete', '/api/auth/login','/api/v2/connections/robinhood/callback']);
 
 export interface ServerOptions { manager: AgenticManager; webRoot?: string; serveWeb?: boolean }
 
 export async function buildServer(options: ServerOptions): Promise<FastifyInstance> {
   const { manager } = options;
-  const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info', redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers.set-cookie', '*.password', '*.token', '*.secret'] }, trustProxy: false, bodyLimit: 512 * 1024, requestTimeout: 30_000 });
+  const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info', serializers:{req:r=>({method:r.method,url:String(r.url).split('?')[0]??'/',remoteAddress:r.ip})},redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers.set-cookie', '*.password', '*.token', '*.secret'] }, trustProxy: false, bodyLimit: 512 * 1024, requestTimeout: 30_000 });
   app.decorateRequest('authUser', null);
   await app.register(cookie);
   await app.register(cors, { origin: (origin, callback) => { const allowed = !origin || origin === (process.env.WEB_ORIGIN ?? 'http://localhost:3000'); callback(null, allowed); }, credentials: true, methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] });
@@ -36,9 +41,14 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     const payload = token ? manager.auth.verify(token) : null;
     if (!payload) return reply.code(401).send({ error: 'AUTH_REQUIRED', message: 'Authentication is required.' });
     request.authUser = { id: payload.sub, username: payload.username, csrf: payload.csrf };
+    if(routePath==='/api/system/codex-reasoning'&&(request.body as {enabled?:boolean}|undefined)?.enabled===true)return reply.code(409).send({error:'V2_AGENT_REQUIRED',message:'Use the persistent agent; ambient Codex brokerage tools are not an app-tool allowlist.'});
     if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
       const csrf = request.headers['x-csrf-token'];
       if (typeof csrf !== 'string' || csrf !== payload.csrf) return reply.code(403).send({ error: 'CSRF_INVALID', message: 'The session CSRF token is missing or invalid.' });
+      const sensitive = /^\/api\/changes\/[^/]+\/confirm$/.test(routePath)
+        || /^\/api\/v2\/sleeves\/[^/]+\/(policy|weight|reset)$/.test(routePath)
+        || ['/api/v2/account-policy','/api/v2/position-transfer','/api/v2/stop-release','/api/v2/upgrade-review'].includes(routePath);
+      if(sensitive)requireRecentAuth(manager,payload.username,payload.csrf);
     }
   });
 
@@ -64,7 +74,12 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     manager.database.setSetting('designated_capital', input.designatedCapital);
     for (const strategy of strategies) manager.database.updateStrategy(strategy.id, { ...strategy.config, allocationAmount: input.allocations[strategy.id] ?? 0 }, 'SETUP', input.username, 'Confirmed first-run allocation');
     manager.database.setSetting('operating_mode', 'SIMULATION'); manager.database.setSetting('live_db_confirmation', false); manager.database.setSetting('setup_complete', true);
+    // Commissioning empty fixture cash is not a trading loss. Never reset an existing trading ledger.
+    if((manager.database.raw.prepare('SELECT COUNT(*) AS n FROM fills').get() as {n:number}).n===0&&manager.ledger.listPositions().length===0){
+      for(const strategy of strategies){const cash=manager.ledger.getCash(strategy.id);manager.database.raw.prepare('UPDATE strategy_capital SET starting_capital=?,weekly_starting_capital=?,high_water_mark=?,killed=0,kill_reason=NULL WHERE strategy_id=?').run(cash,cash,cash,strategy.id);}
+    }
     if (input.demoData) await manager.seedDemoData();
+    await manager.proposals.reconcile();manager.analytics.snapshot('FIRST_RUN_COMMISSIONING');
     const session = await manager.auth.authenticate(input.username, input.password);
     if (!session) throw new Error('New administrator session could not be created');
     setSessionCookie(reply, session.token);
@@ -83,6 +98,8 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   app.get('/api/auth/session', async (request) => ({ user: { id: request.authUser?.id, username: request.authUser?.username }, csrf: request.authUser?.csrf }));
 
   app.get('/api/dashboard', async () => dashboard(manager));
+  registerV2(app,manager);
+  registerPreproduction(app,manager);
   app.get('/api/strategies', async () => ({ strategies: manager.database.listStrategies(), positions: manager.ledger.listPositions(), watchlists: manager.database.raw.prepare('SELECT * FROM watchlists ORDER BY strategy_id,symbol').all(), directives: manager.directives.list(undefined, true) }));
   app.get('/api/strategies/:id/versions', async (request) => {
     const { id } = request.params as { id: string };
@@ -135,30 +152,33 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   app.get('/api/briefs', async () => ({ briefs: manager.database.raw.prepare('SELECT id,report_date AS reportDate,content_json AS content,created_at AS createdAt FROM daily_briefs ORDER BY report_date DESC LIMIT 30').all().map((row) => normalizeJsonColumns(row as Record<string, unknown>, ['content'])) }));
   app.post('/api/briefs/generate', async (request) => { const report = generateDailyBrief(manager); const date = nowIso().slice(0, 10); manager.database.raw.prepare(`INSERT INTO daily_briefs(id,report_date,content_json,created_at) VALUES(?,?,?,?) ON CONFLICT(report_date) DO UPDATE SET content_json=excluded.content_json,created_at=excluded.created_at`).run(makeId('brief'), date, JSON.stringify(report), nowIso()); manager.database.audit(actor(request), 'DAILY_BRIEF_GENERATED', 'daily_brief', date, {}); return report; });
 
-  app.post('/api/manager/chat', async (request) => { const { message } = managerMessageSchema.parse(request.body); return manager.chat.interpret(message, actor(request)); });
+  app.post('/api/manager/chat', async (request) => { const { message } = managerMessageSchema.parse(request.body); const session=manager.tradingAgent.create(actor(request),'ADVISOR');return manager.tradingAgent.chat(session.id,actor(request),message); });
   app.get('/api/changes', async () => ({ changes: manager.database.raw.prepare("SELECT id,type,status,payload_json AS payload,requested_by AS requestedBy,reason,created_at AS createdAt,expires_at AS expiresAt,confirmed_at AS confirmedAt FROM pending_changes ORDER BY created_at DESC LIMIT 100").all().map((row) => normalizeJsonColumns(row as Record<string, unknown>, ['payload'])) }));
   app.post('/api/changes/:id/confirm', async (request) => { const { id } = request.params as { id: string }; return confirmPending(manager, id, actor(request)); });
   app.post('/api/changes/:id/reject', async (request) => { const { id } = request.params as { id: string }; const result = manager.database.raw.prepare("UPDATE pending_changes SET status='REJECTED',confirmed_at=? WHERE id=? AND status='PENDING'").run(nowIso(), id); if (result.changes !== 1) throw Object.assign(new Error('Pending change not found'), { statusCode: 404 }); manager.database.audit(actor(request), 'CHANGE_REJECTED', 'pending_change', id, {}); return { ok: true }; });
 
   app.get('/api/robinhood/status', async () => manager.robinhood.discoverCapabilities());
-  app.post('/api/reconciliation/run', async () => { const mode = manager.database.getMode(); const snapshot = mode === 'SIMULATION' ? manager.reconciliation.simulationSnapshot() : await manager.robinhood.getAccountSnapshot(); const mismatches = manager.reconciliation.reconcile(snapshot, mode === 'SIMULATION' ? 'SIMULATION' : 'ROBINHOOD'); return { clear: mismatches.length === 0, mismatches }; });
+  app.post('/api/reconciliation/run', async () => manager.proposals.reconcile());
   app.get('/api/reconciliation', async () => ({ clear: manager.database.getSetting<boolean>('reconciliation_clear', true), lastRunAt: manager.database.getSetting<string | null>('last_reconciliation_at', null), events: manager.database.raw.prepare('SELECT * FROM reconciliation_events ORDER BY created_at DESC LIMIT 100').all(), brokerPositions: manager.database.raw.prepare('SELECT * FROM broker_positions ORDER BY symbol').all(), internalPositions: manager.ledger.aggregatePositions() }));
-  app.post('/api/reconciliation/:id/resolve', async (request) => { const { id } = request.params as { id: string }; const input = z.object({ resolution: z.enum(['ACKNOWLEDGE_EXTERNAL', 'REVERSE_AT_BROKER', 'ATTRIBUTE_TO_STRATEGY']), strategyId: z.string().optional() }).parse(request.body); manager.reconciliation.resolve(id, input.resolution, actor(request), input.strategyId); return { ok: true }; });
+  app.post('/api/reconciliation/:id/resolve', async () => {throw Object.assign(new Error('V2 requires explicit ownership assignment and fresh broker reconciliation; acknowledgement cannot clear a financial discrepancy.'),{statusCode:409});});
 
   app.post('/api/system/pause', async (request) => { const { paused } = z.object({ paused: z.boolean() }).parse(request.body); manager.database.setSetting('global_pause', paused); manager.database.audit(actor(request), paused ? 'GLOBAL_PAUSE_ENABLED' : 'GLOBAL_PAUSE_DISABLED', 'system', null, {}, request.ip); manager.events.publish({ type: paused ? 'GLOBAL_PAUSE' : 'GLOBAL_RESUME', severity: paused ? 'WARNING' : 'INFO', source: 'ADMIN', payload: {} }); return { paused }; });
   app.post('/api/system/maintenance', async (request) => { const { enabled } = z.object({ enabled: z.boolean() }).parse(request.body); manager.database.setSetting('maintenance_mode', enabled); manager.database.audit(actor(request), enabled ? 'MAINTENANCE_ENABLED' : 'MAINTENANCE_DISABLED', 'system', null, {}); return { enabled }; });
   app.get('/api/system/settings', async () => ({ codexReasoningEnabled: manager.database.getSetting<boolean>('codex_reasoning_enabled', false), marketDataTradingEligible: manager.database.getSetting<boolean>('market_data_trading_eligible', false) }));
   app.post('/api/system/codex-reasoning', async (request) => { const { enabled } = z.object({ enabled: z.boolean() }).parse(request.body); manager.database.setSetting('codex_reasoning_enabled', enabled); manager.database.audit(actor(request), enabled ? 'CODEX_REASONING_ENABLED' : 'CODEX_REASONING_DISABLED', 'system', null, {}); return { enabled }; });
-  app.post('/api/system/emergency-stop', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request) => { manager.database.setSetting('global_pause', true); manager.database.setSetting('live_db_confirmation', false); manager.database.audit(actor(request), 'EMERGENCY_STOP', 'system', null, {}, request.ip); manager.events.publish({ type: 'EMERGENCY_STOP', severity: 'CRITICAL', source: 'ADMIN', payload: {} }); return { stopped: true, liveConfirmationRevoked: true }; });
+  app.post('/api/system/emergency-stop', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request) => { manager.database.setSetting('global_pause', true); manager.database.setSetting('stopped',true);manager.database.setSetting('v2_live_activation',false);manager.database.setSetting('live_db_confirmation', false); manager.notifications.emit('stop:'+Date.now(),'STOP','CRITICAL',{summary:'Emergency STOP engaged; LIVE confirmation revoked',actor:actor(request)}); manager.database.audit(actor(request), 'EMERGENCY_STOP', 'system', null, {}, request.ip); manager.events.publish({ type: 'EMERGENCY_STOP', severity: 'CRITICAL', source: 'ADMIN', payload: {} }); return { stopped: true, liveConfirmationRevoked: true }; });
   app.post('/api/system/mode', async (request) => {
     const input = z.object({ mode: operatingModeSchema, confirmation: z.string().optional() }).parse(request.body);
     if (input.mode === 'LIVE') {
+      if(PREPRODUCTION_LIVE_LOCK)throw Object.assign(new Error('DO NOT ENABLE LIVE YET: pre-production lock is active'),{statusCode:409});
       if (process.env.TRADING_MODE !== 'LIVE' || process.env.ALLOW_LIVE_TRADING !== 'true') throw Object.assign(new Error('Set both TRADING_MODE=LIVE and ALLOW_LIVE_TRADING=true before database confirmation.'), { statusCode: 409 });
       if (input.confirmation !== 'ENABLE LIVE TRADING') throw Object.assign(new Error('Exact LIVE confirmation phrase is required.'), { statusCode: 400 });
       if (!manager.database.getSetting<boolean>('reconciliation_clear', false)) throw Object.assign(new Error('Reconciliation must be clear before LIVE can be enabled.'), { statusCode: 409 });
-      const status = await manager.robinhood.discoverCapabilities(true); if (!status.authenticated) throw Object.assign(new Error('Robinhood MCP must be authenticated before LIVE can be enabled.'), { statusCode: 409 });
+      if(!readiness(manager).ready)throw Object.assign(new Error('V2 LIVE readiness checks have not passed; inspect /api/v2/readiness.'),{statusCode:409});
+      manager.database.setSetting('v2_live_activation',true);
       manager.database.setSetting('live_db_confirmation', true);
-    } else manager.database.setSetting('live_db_confirmation', false);
+    } else {manager.database.setSetting('live_db_confirmation', false);manager.database.setSetting('v2_live_activation',false);}
+    if(input.mode!==manager.database.getMode()){manager.database.setSetting('broker_account_v2',null);manager.database.setSetting('reconciliation_clear',false);manager.database.setSetting('reconciliation_v2',['Account refresh required after mode change']);manager.database.setSetting('broker_verification_mode_v2','UNVERIFIED');}
     manager.database.setSetting('operating_mode', input.mode); manager.database.audit(actor(request), 'OPERATING_MODE_CHANGED', 'system', null, { mode: input.mode }, request.ip);
     return { mode: input.mode, liveConfirmed: input.mode === 'LIVE' };
   });
@@ -190,12 +210,15 @@ function createPending(manager: AgenticManager, type: string, payload: Record<st
   return { change: { id, type, status: 'PENDING', payload, requestedBy, reason, createdAt, expiresAt } };
 }
 
-function confirmPending(manager: AgenticManager, id: string, confirmedBy: string): { ok: true; result: unknown } {
+async function confirmPending(manager: AgenticManager, id: string, confirmedBy: string): Promise<{ ok: true; result: unknown }> {
   const row = manager.database.raw.prepare("SELECT type,payload_json,expires_at FROM pending_changes WHERE id=? AND status='PENDING'").get(id) as { type: string; payload_json: string; expires_at: string } | undefined;
   if (!row) throw Object.assign(new Error('Pending change not found'), { statusCode: 404 });
   if (new Date(row.expires_at).getTime() < Date.now()) { manager.database.raw.prepare("UPDATE pending_changes SET status='EXPIRED' WHERE id=?").run(id); throw Object.assign(new Error('Pending change expired'), { statusCode: 409 }); }
   const payload = parseJson<Record<string, unknown>>(row.payload_json); let result: unknown = null;
   switch (row.type) {
+    case 'V2_SCHEDULER':result=manager.tradingScheduler.update(String(payload.jobId),String(payload.cron),Boolean(payload.enabled),confirmedBy);break;
+    case 'V2_NOTIFICATIONS':{const preferences={...payload};delete preferences.reason;result=manager.notifications.update(notificationPreferencesSchema.parse(preferences),confirmedBy);break;}
+    case 'RISK_CONFIGURATION': result=manager.riskConfiguration.apply(payload.config,Number(payload.expectedVersion),confirmedBy,String(payload.reason),'APPLY RISK CONFIGURATION',{instruction:String(payload.instruction),interpretation:String(payload.interpretation),sessionId:String(payload.sessionId)});break;
     case 'UPDATE_STRATEGY': result = manager.database.updateStrategy(String(payload.strategyId), strategyConfigSchema.parse(payload.config), 'ADMIN_UI', confirmedBy, `Confirmed pending change ${id}`); break;
     case 'UPDATE_GLOBAL_RISK': { const config = globalRiskConfigSchema.parse(payload.config); manager.database.setSetting('global_risk', config); manager.database.audit(confirmedBy, 'GLOBAL_RISK_UPDATED', 'risk_config', 'global', { pendingChangeId: id }); result = config; break; }
     case 'SET_STRATEGY_ENABLED': manager.database.setStrategyEnabled(String(payload.strategyId), Boolean(payload.enabled), confirmedBy, `Confirmed pending change ${id}`); result = manager.database.getStrategy(String(payload.strategyId)); break;
@@ -203,6 +226,10 @@ function confirmPending(manager: AgenticManager, id: string, confirmedBy: string
     case 'SET_STRATEGY_ALLOCATION': { const strategy = manager.database.getStrategy(String(payload.strategyId)); if (!strategy) throw new Error('Strategy not found'); result = manager.database.updateStrategy(strategy.id, { ...strategy.config, allocationAmount: Number(payload.amount) }, 'MANAGER_CHAT', confirmedBy, `Confirmed pending change ${id}`); break; }
     case 'REVERT_STRATEGY': result = manager.database.revertStrategy(String(payload.strategyId), Number(payload.version), confirmedBy); break;
     case 'CREATE_DIRECTIVE': result = manager.directives.create(directiveSchema.parse(payload), confirmedBy); break;
+    case 'V2_POLICY':result=manager.allocation.updatePolicy(sleeveSchema.parse(payload.strategy),payload.config,confirmedBy);break;
+    case 'V2_WEIGHT':manager.allocation.setWeight(sleeveSchema.parse(payload.strategy),z.number().min(0).max(1).parse(payload.targetWeight),confirmedBy);result={ok:true};break;
+    case 'V2_RESUME':{const s=sleeveSchema.parse(payload.strategy);if(manager.allocation.state(s).killed)throw new Error('Weekly kill-switch review/reset required');manager.database.setStrategyEnabled(s,true,confirmedBy,'Confirmed V2 resume');result={ok:true};break;}
+    case 'V2_ORDER_CANCEL':result=await manager.proposals.cancel(String(payload.proposalId),confirmedBy);break;
     default: throw new Error(`Unsupported pending change type: ${row.type}`);
   }
   manager.database.raw.prepare("UPDATE pending_changes SET status='CONFIRMED',confirmed_at=? WHERE id=?").run(nowIso(), id); manager.database.audit(confirmedBy, 'CHANGE_CONFIRMED', 'pending_change', id, { type: row.type, payload });

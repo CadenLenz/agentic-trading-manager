@@ -1,12 +1,15 @@
 export const STRATEGY_IDS = {
-  dayTrader: 'day-trader',
-  aggressiveGrowth: 'aggressive-growth',
-  longTerm: 'long-term-investor',
+  dayTrader: 'OPTIONS',
+  aggressiveGrowth: 'AGGRESSIVE_STOCKS',
+  longTerm: 'SAFE_LONG_TERM',
+  safe: 'SAFE_LONG_TERM',
+  aggressive: 'AGGRESSIVE_STOCKS',
+  options: 'OPTIONS',
 } as const;
 
 export type OperatingMode = 'SIMULATION' | 'READ_ONLY' | 'LIVE';
 export type AgentStatus = 'IDLE' | 'WATCHING' | 'QUEUED' | 'ANALYZING' | 'AWAITING_DATA' | 'PROPOSING' | 'RISK_CHECK' | 'EXECUTING' | 'PAUSED' | 'ERROR';
-export type StrategyKind = 'DAY_TRADER' | 'AGGRESSIVE_GROWTH' | 'LONG_TERM';
+export type StrategyKind = 'DAY_TRADER' | 'AGGRESSIVE_GROWTH' | 'LONG_TERM' | 'SAFE_LONG_TERM' | 'AGGRESSIVE_STOCKS' | 'OPTIONS';
 export type OrderSide = 'BUY' | 'SELL';
 export type ProposalAction = OrderSide | 'HOLD' | 'RESEARCH';
 export type AssetType = 'EQUITY' | 'ETF' | 'OPTION' | 'CRYPTO';
@@ -259,7 +262,7 @@ export const EXAMPLE_GLOBAL_RISK: GlobalRiskConfig = {
 const baseScanner: ScannerRules = { minPrice: 5, maxPrice: 500, minRelativeVolume: 1.5, minMovePercent: 2, maxSpreadPercent: 0.75, limit: 20 };
 const baseSchedule: StrategySchedule = { timezone: 'America/New_York', reviewCron: '0 10 * * 1-5', marketOpenReview: true, preCloseReview: true };
 
-export const EXAMPLE_STRATEGY_CONFIGS: Record<StrategyKind, StrategyConfig> = {
+export const EXAMPLE_STRATEGY_CONFIGS: Record<'DAY_TRADER' | 'AGGRESSIVE_GROWTH' | 'LONG_TERM', StrategyConfig> = {
   DAY_TRADER: {
     allocationAmount: 10_000, maxPositionPercent: 15, maxSectorExposurePercent: 35, maxDailyLossPercent: 1.5,
     maxDrawdownPercent: 5, maxSimultaneousPositions: 4, maxTradesPerDay: 8, overnightHoldingsAllowed: false,

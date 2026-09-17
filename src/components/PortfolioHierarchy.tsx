@@ -1,0 +1,12 @@
+import {useEffect,useState} from 'react';
+import {api} from '../api';
+import {EquityChart} from './PreproductionPanels';
+type Point={at:string;value:number};
+type Position={strategy_id:string;symbol:string;quantity:number;average_cost:number;market_price:number};
+const sleeves=['SAFE_LONG_TERM','AGGRESSIVE_STOCKS','OPTIONS'];
+const money=(n:number)=>n.toLocaleString('en-US',{style:'currency',currency:'USD'});
+export function PortfolioHierarchy(){
+  const [period,setPeriod]=useState('1D'),[positions,setPositions]=useState<Position[]>([]),[charts,setCharts]=useState<Record<string,Point[]>>({});
+  useEffect(()=>{let cancelled=false;const load=async()=>{const p=await api<Position[]>('/api/v2/resources/positions');const entries=await Promise.all([...sleeves.map(s=>({key:s,url:'/api/v2/charts?period='+period+'&strategy='+s})),...p.map(v=>({key:v.strategy_id+':'+v.symbol,url:'/api/v2/charts?period='+period+'&strategy='+v.strategy_id+'&instrument='+encodeURIComponent(v.symbol)}))].map(async c=>[c.key,(await api<{points:Point[]}>(c.url)).points] as const));if(!cancelled){setPositions(p);setCharts(Object.fromEntries(entries));}};void load();const timer=setInterval(()=>void load(),30000);return()=>{cancelled=true;clearInterval(timer);};},[period]);
+  return <section className="terminal-stack"><div className="terminal-toolbar"><h2>Sleeves and owned positions</h2><select aria-label="Sleeve and position chart period" value={period} onChange={e=>setPeriod(e.target.value)}>{['1D','1W','1M','3M','1Y','ALL'].map(p=><option key={p}>{p}</option>)}</select></div><div className="terminal-card-grid">{sleeves.map(s=><article className="panel terminal-panel" key={s}><h3>{s.replaceAll('_',' ')}</h3><EquityChart points={charts[s]??[]} label={s+' attributable equity'}/></article>)}</div><div className="terminal-card-grid">{positions.map(p=>{const pnl=p.quantity*(p.market_price-p.average_cost),pct=p.average_cost?100*(p.market_price/p.average_cost-1):null;return <article className="panel terminal-panel" key={p.strategy_id+':'+p.symbol}><p className="eyebrow">{p.strategy_id.replaceAll('_',' ')}</p><h3>{p.symbol} · {money(p.quantity*p.market_price)}</h3><p className={pnl>0?'positive':pnl<0?'negative':'muted'}>{money(pnl)} · {pct===null?'Unavailable':pct.toFixed(2)+'%'}</p><EquityChart compact points={charts[p.strategy_id+':'+p.symbol]??[]} label={p.symbol+' owned position value'}/></article>;})}</div>{!positions.length&&<p className="muted">No owned equity positions. Options are shown in the contract telemetry view.</p>}</section>;
+}
