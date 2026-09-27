@@ -114,7 +114,7 @@ export class PersistentTradingAgent {
     this.db.raw.prepare('INSERT INTO agent_messages VALUES(?,?,?,?,?,?)').run(userMessageId,sessionId,turnId,'user',message,nowIso());
     let reply='';
     try{
-      if(!process.env.OPENAI_API_KEY&&this.transport instanceof OpenAIResponsesTransport)reply='OpenAI is not configured. Your conversation is saved. Configure OPENAI_API_KEY and OPENAI_MODEL on the Pi; this offline response performed no tool calls or trades.';
+      if(!process.env.OPENAI_API_KEY&&this.transport instanceof OpenAIResponsesTransport)reply='OpenAI is not configured. Your conversation is saved. Open Setup & connections, choose Connect OpenAI, then check access. No actions or trades were performed.';
       else {
         const history=this.db.raw.prepare('SELECT role,content FROM agent_messages WHERE session_id=? ORDER BY rowid DESC LIMIT 30').all(sessionId) as Array<{role:string;content:string}>;
         const input:Array<Record<string,unknown>>=history.reverse().map(m=>({role:m.role,content:m.content}));

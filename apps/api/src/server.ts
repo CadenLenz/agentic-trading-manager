@@ -1,3 +1,5 @@
+import {actionError} from './action-errors.js';
+import {ConnectionSetupError} from '../../../packages/trading-v2/src/connection-setup.js';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
@@ -44,7 +46,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     if(routePath==='/api/system/codex-reasoning'&&(request.body as {enabled?:boolean}|undefined)?.enabled===true)return reply.code(409).send({error:'V2_AGENT_REQUIRED',message:'Use the persistent agent; ambient Codex brokerage tools are not an app-tool allowlist.'});
     if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
       const csrf = request.headers['x-csrf-token'];
-      if (typeof csrf !== 'string' || csrf !== payload.csrf) return reply.code(403).send({ error: 'CSRF_INVALID', message: 'The session CSRF token is missing or invalid.' });
+      if (typeof csrf !== 'string' || csrf !== payload.csrf) return reply.code(403).send({ error: 'CSRF_INVALID', message: 'Your session has changed. Refresh the page, sign in if asked, and retry.' });
       const sensitive = /^\/api\/changes\/[^/]+\/confirm$/.test(routePath)
         || /^\/api\/v2\/sleeves\/[^/]+\/(policy|weight|reset)$/.test(routePath)
         || ['/api/v2/account-policy','/api/v2/position-transfer','/api/v2/stop-release','/api/v2/upgrade-review'].includes(routePath);
@@ -53,12 +55,15 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
 
   app.setErrorHandler((error, request, reply) => {
-    if (error instanceof ZodError) return reply.code(400).send({ error: 'VALIDATION_ERROR', message: 'Request validation failed.', issues: error.issues });
+    if (error instanceof ConnectionSetupError) return reply.code(error.statusCode).send({error:error.code,message:error.message});
+    if (error instanceof ZodError) return reply.code(400).send({ error: 'VALIDATION_ERROR', message: 'Some fields are missing or invalid. Check the form values and try again.', issues: error.issues });
     const normalized = error instanceof Error ? error : new Error(String(error));
+    const explanation=actionError(normalized.message);
+    if(explanation)return reply.code(409).send({error:'ACTION_BLOCKED',message:explanation});
     const candidate = error && typeof error === 'object' && 'statusCode' in error ? (error as { statusCode?: unknown }).statusCode : undefined;
     const status = typeof candidate === 'number' && candidate >= 400 ? candidate : 500;
     request.log.error({ err: error }, 'request failed');
-    return reply.code(status).send({ error: status >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR', message: status >= 500 ? 'The request could not be completed safely.' : normalized.message });
+    return reply.code(status).send({ error: status >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR', message: status >= 500 ? 'The action could not be completed. Refresh to check its status before retrying. If this continues, inspect the server log using this request ID: '+request.id : normalized.message });
   });
 
   app.get('/health', async () => manager.health());
