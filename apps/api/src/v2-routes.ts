@@ -1,3 +1,4 @@
+import {taskSettings} from '../../../packages/agents/src/task-contract.js';
 import type {FastifyInstance,FastifyRequest} from 'fastify';
 import {z} from 'zod';
 import type {AgenticManager} from '../../../packages/core/src/agentic-manager.js';
@@ -11,7 +12,7 @@ export function readiness(m:AgenticManager){
   const checks={ownershipReviewed:!db.getSetting('v2_migration_review_required',false),reconciled:db.getSetting('reconciliation_clear',false),
     accountFresh:!!a&&Date.now()-Date.parse(a.asOf)<=60000&&Date.now()-Date.parse(a.asOf)>=-5000,accountScope:!!a?.agentic&&!!a.complete&&a.accountId===process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID,readOnlyVerification:['READ_ONLY','LIVE'].includes(db.getSetting('broker_verification_mode_v2','SIMULATION')),
     optionsLevel:a?.optionsLevel===2,selfTests:db.getSetting('self_tests_v2',false),simulatedLifecycle:db.getSetting('simulated_lifecycle_v2',false),
-    deterministicBroker:!!m.options.liveBroker?.deterministic,verifiedMarketData:m.market.tradingEligible,openaiConfigured:!!process.env.OPENAI_API_KEY,
+    deterministicBroker:!!m.options.liveBroker?.deterministic,verifiedMarketData:m.market.tradingEligible,
     calendarFresh:!!db.raw.prepare('SELECT date FROM market_sessions WHERE opens_at<=? AND closes_at>? AND verified_at>?').get(nowIso(),nowIso(),new Date(Date.now()-7*86400000).toISOString())};
   return {ready:Object.values(checks).every(Boolean),checks,liveActivation:db.getSetting('v2_live_activation',false),mode:db.getMode(),
     schemaVersion:(db.raw.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as {v:number}).v,gitSha:process.env.APP_GIT_SHA??'unrecorded',version:'2.0.0',uptime:m.health().uptimeSeconds,
@@ -19,6 +20,15 @@ export function readiness(m:AgenticManager){
 }
 export function registerV2(app:FastifyInstance,m:AgenticManager){
   const db=m.database;
+  app.get('/api/v2/codex/status',()=>m.codexTasks.status());
+  app.get('/api/v2/codex/tasks',async()=>m.codexTasks.list());
+  app.post('/api/v2/codex/tasks',async r=>{const b=z.object({message:z.string().min(1).max(12000),id:z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/).optional()}).strict().parse(r.body);return m.codexTasks.create(b.message,actor(r),b.id?{id:b.id}:undefined);});
+  app.post('/api/v2/codex/tasks/:id/cancel',r=>m.codexTasks.cancel(params(r),actor(r)));
+  app.get('/api/v2/codex/schedules',async()=>m.codexTasks.schedules());
+  app.post('/api/v2/codex/schedules',async r=>m.codexTasks.schedule(r.body,actor(r)));
+  app.post('/api/v2/codex/schedules/:id',async r=>m.codexTasks.schedule(r.body,actor(r),params(r)));
+  app.post('/api/v2/codex/settings',async r=>m.codexTasks.configure(taskSettings.parse(r.body),actor(r)));
+
   app.get('/api/v2/state',async()=>({account:db.getSetting('broker_account_v2',null),sleeves:SLEEVES.map(s=>({...m.allocation.state(s),enabled:db.getStrategy(s)!.enabled,target:(db.getSetting<{netAccountValue:number}|null>('broker_account_v2',null)?.netAccountValue??0)*m.allocation.policy(s).targetWeight,openOrders:(db.raw.prepare("SELECT COUNT(*) AS n FROM orders WHERE strategy_id=? AND status IN ('PENDING','SUBMITTED','PARTIALLY_FILLED','UNKNOWN')").get(s) as {n:number}).n})),readiness:readiness(m),globalPause:db.getSetting('global_pause',false),stopped:db.getSetting('stopped',false),maintenance:db.getSetting('maintenance_mode',false),reconciliation:db.getSetting('reconciliation_v2',[]),policy:db.getSetting('account_policy_v2',DEFAULT_ACCOUNT_POLICY)}));
   app.get('/api/v2/proposals',async()=>m.proposals.list());
   app.get('/api/v2/proposals/:id',async r=>m.proposals.detail(params(r)));
@@ -50,5 +60,5 @@ export function registerV2(app:FastifyInstance,m:AgenticManager){
   app.get('/api/v2/agent/sessions',async r=>m.tradingAgent.sessions(actor(r)));
   app.post('/api/v2/agent/sessions',async r=>{const b=z.object({mode:agentModeSchema}).strict().parse(r.body);return m.tradingAgent.create(actor(r),b.mode);});
   app.get('/api/v2/agent/sessions/:id',async r=>({session:m.tradingAgent.session(params(r),actor(r)),messages:m.tradingAgent.history(params(r),actor(r)),actions:m.tradingAgent.actions(params(r),actor(r))}));
-  app.post('/api/v2/agent/sessions/:id/chat',async r=>{const b=z.object({message:z.string().min(1).max(12000)}).strict().parse(r.body);return m.tradingAgent.chat(params(r),actor(r),b.message);});
+  app.post('/api/v2/agent/sessions/:id/chat',async r=>{const b=z.object({message:z.string().min(1).max(12000)}).strict().parse(r.body);m.tradingAgent.session(params(r),actor(r));return m.codexTasks.create(b.message,actor(r));});
 }

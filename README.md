@@ -1,6 +1,6 @@
 # Agentic Trading Manager V2
 
-An in-place update to the Raspberry Pi trading control plane: React/Vite, Fastify, SQLite/WAL, attributed FIFO ledger, persisted proposals, deterministic risk, local reports/scheduling and persistent OpenAI app-tool chat.
+An in-place update to the Raspberry Pi trading control plane: React/Vite, Fastify, SQLite/WAL, attributed FIFO ledger, persisted proposals, deterministic risk, local reports/scheduling and bounded Codex CLI tasks using ChatGPT login.
 
 **Current status: approved pre-production commissioning candidate, simulation-validated; not production LIVE-ready or fully feature-complete. DO NOT ENABLE LIVE YET.** Placement and LIVE activation are locked in code, even with environment flags. Publication does not constitute Pi, connector, account, preview, or LIVE acceptance.
 
@@ -18,7 +18,7 @@ Exactly three active sleeves:
 
 Targets use total net account value, never buying power. Weekly allocation transfers free cash outside tolerance bands and never forces sales. Options collateral/share ownership is sleeve-specific. 60% drawdown is a latched emergency backstop; much tighter normal and inherited risk controls apply first. All policies default to manual approval.
 
-The application owns risk and execution. AgentChat offers only 18 typed application tools, persists conversations/actions and never exposes raw DB, broker, OS or approval tools.
+The application owns risk and execution. Codex Tasks sends typed jobs to a separate authenticated worker, records results, and validates every proposed action. See [Codex worker architecture and operations](docs/CODEX_WORKER.md).
 
 ## Development
 
@@ -27,7 +27,7 @@ Node >=22.13, npm and Git are required. On Pi use 64-bit ARM64 Raspberry Pi OS w
 ```bash
 npm ci
 cp .env.example .env
-# Set a random SESSION_SECRET. Optional OpenAI key stays in .env, never source control/chat.
+# Set a random SESSION_SECRET. No OpenAI API key is required.
 npm run lint
 npm run typecheck
 npm test
@@ -37,7 +37,7 @@ npm audit --omit=dev
 npm run dev
 ```
 
-Windows PowerShell: Copy-Item .env.example .env instead of cp. Vite binds 127.0.0.1:3000; API 127.0.0.1:4010. First-run funds are labeled Simulation examples, not Robinhood balances. Without OPENAI_API_KEY, chat explicitly runs offline while retaining messages. Research tools attach supplied checklist evidence; they do not fetch or verify current news.
+Windows PowerShell: Copy-Item .env.example .env instead of cp. Vite binds 127.0.0.1:3000; API 127.0.0.1:4010. First-run funds are labeled Simulation examples, not Robinhood balances. The dashboard works without Codex. For reasoning, deploy the private Unix-socket worker under the externally authenticated Codex user. Unavailable jobs fail safely and never fall back to API billing. Read-only Robinhood MCP tools are allowlisted; deterministic reconciliation retains its independent optional connector.
 
 ## Upgrade safety
 

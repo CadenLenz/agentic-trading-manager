@@ -39,6 +39,7 @@ DATA_DIR=/var/lib/agentic-trading-manager runuser -u agentic-trader -- npm run u
 ln -s "$release" /opt/agentic-trading-manager/current
 install -m 0644 systemd/agentic-trading-manager.service /etc/systemd/system/
 install -m 0644 systemd/agentic-trading-manager-backup.service systemd/agentic-trading-manager-backup.timer /etc/systemd/system/
+bash scripts/pi-worker-install.sh
 systemctl daemon-reload
 systemctl enable --now agentic-trading-manager agentic-trading-manager-backup.timer
 if ! curl --retry 10 --retry-delay 2 --retry-connrefused --fail --silent http://127.0.0.1:4010/health; then systemctl stop agentic-trading-manager; echo "Health check failed; service stopped."; exit 1; fi

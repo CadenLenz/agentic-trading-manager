@@ -44,6 +44,7 @@ const DRAFT=new Set<ToolName>(['create_trade_proposal','research_equity','resear
 export interface AgentTransport {respond(body:Record<string,unknown>):Promise<{output:Array<Record<string,unknown>>}>}
 export class OpenAIResponsesTransport implements AgentTransport {
   async respond(body:Record<string,unknown>){
+    if(process.env.ENABLE_LEGACY_OPENAI_API!=='true')throw new Error('Legacy API inference is disabled; use Codex Tasks');
     if(!process.env.OPENAI_API_KEY)throw new Error('OPENAI_API_KEY is not configured');
     const response=await fetch('https://api.openai.com/v1/responses',{method:'POST',headers:{Authorization:'Bearer '+process.env.OPENAI_API_KEY,'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(45000)});
     if(!response.ok)throw new Error('OpenAI Responses request failed (HTTP '+response.status+'); no automatic replay of mutating tools');

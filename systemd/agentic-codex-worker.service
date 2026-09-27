@@ -1,0 +1,38 @@
+[Unit]
+Description=Agentic Trading Manager bounded Codex worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cadenlenz
+Group=agentic-codex
+WorkingDirectory=/opt/agentic-trading-manager/current
+Environment=HOME=/home/cadenlenz
+Environment=CODEX_HOME=/home/cadenlenz/.codex
+Environment=CODEX_BIN=/usr/bin/codex
+Environment=CODEX_WORKER_DATA=/var/lib/agentic-codex-worker
+Environment=CODEX_WORKER_SOCKET=/run/agentic-codex-worker/worker.sock
+ExecStart=/usr/bin/node /opt/agentic-trading-manager/current/dist/worker/index.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillMode=control-group
+RuntimeDirectory=agentic-codex-worker
+RuntimeDirectoryMode=0750
+StateDirectory=agentic-codex-worker
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindPaths=/home/cadenlenz/.codex
+ReadWritePaths=/var/lib/agentic-codex-worker /run/agentic-codex-worker /home/cadenlenz/.codex
+InaccessiblePaths=/var/lib/agentic-trading-manager /etc/agentic-trading-manager /var/backups/agentic-trading-manager
+RestrictSUIDSGID=true
+LockPersonality=true
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

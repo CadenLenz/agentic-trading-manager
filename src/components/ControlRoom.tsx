@@ -1,10 +1,11 @@
+import {CodexTasks} from './CodexTasks';
 import {AccountExperience} from './AccountExperience';
 import {ConnectionGuide} from './ConnectionGuide';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BarChart3, Bell, Bot, ChevronLeft, CircleGauge, Eye, History, LayoutDashboard, LogOut, Menu, MessageSquareText, Octagon, Pause, Play, RefreshCw, Scale, Settings, ShieldAlert, SlidersHorizontal, Wifi } from 'lucide-react';
 import { api, post } from '../api';
 import type { Dashboard, View } from '../types';
-import { ActivityView, AgentsView, PerformanceView, ReconciliationView, RiskView, SettingsView, StrategiesView, WatchlistsView } from './Views';
+import { ActivityView, PerformanceView, ReconciliationView, RiskView, SettingsView, StrategiesView, WatchlistsView } from './Views';
 import { AgentChat } from './AgentChat';
 import { TradingWorkspace } from './TradingWorkspace';
 import {SimulationPanel,RiskConfigurationPanel,NotificationsPanel,AcceptancePanel,OptionsTelemetryPanel} from './PreproductionPanels';
@@ -24,7 +25,7 @@ const nav: Array<{ id: View; label: string; icon: typeof LayoutDashboard }> = [
   {id:'notifications',label:'Notifications',icon:Bell},
   {id:'connections',label:'Setup & connections',icon:Wifi},
   {id:'acceptance',label:'Pi & readiness',icon:ShieldAlert},
-  { id: 'overview', label: 'Account', icon: LayoutDashboard }, { id: 'agents', label: 'Agents', icon: Bot }, { id: 'strategies', label: 'Strategies', icon: SlidersHorizontal },
+  { id: 'overview', label: 'Account', icon: LayoutDashboard }, { id: 'agents', label: 'Codex Tasks', icon: Bot }, { id: 'strategies', label: 'Strategies', icon: SlidersHorizontal },
   { id: 'watchlists', label: 'Watchlists', icon: Eye }, { id: 'risk', label: 'Risk', icon: ShieldAlert }, { id: 'performance', label: 'Performance', icon: BarChart3 },
   { id: 'reconciliation', label: 'Reconciliation', icon: Scale }, { id: 'activity', label: 'Activity', icon: History }, { id: 'settings', label: 'Settings', icon: Settings },
 ];
@@ -49,7 +50,7 @@ export function ControlRoom({ initial, onLogout }: { initial: Dashboard; onLogou
     <aside className="app-rail">
       <button className="brand app-brand" onClick={() => setView('overview')}><span>A</span><strong>Agentic</strong></button>
       <button className="rail-collapse" onClick={() => setRailOpen(false)} aria-label="Collapse navigation"><ChevronLeft /></button>
-      <nav aria-label="Main navigation">{['overview','strategies','portfolio','options-telemetry','trading','risk-configuration','connections','simulation','notifications'].map(id=>nav.find(n=>n.id===id)!).map((item) => { const Icon = item.icon; return <button key={item.id} aria-current={view === item.id ? 'page' : undefined} className={view === item.id ? 'active' : ''} onClick={() => { setView(item.id); setRailOpen(false); }}><Icon size={17} /><span>{item.label}</span>{item.id === 'risk' && dashboard.recentRisks.length > 0 ? <i>{dashboard.recentRisks.length}</i> : null}</button>; })}<button aria-expanded={advanced} onClick={()=>setAdvanced(!advanced)}><Settings size={17}/><span>More tools</span><span>{advanced?'-':'+'}</span></button>{advanced&&nav.filter(n=>!['overview','strategies','portfolio','options-telemetry','trading','risk-configuration','connections','simulation','notifications'].includes(n.id)).map(item=><button key={item.id} className={view===item.id?'active':''} onClick={()=>{setView(item.id);setRailOpen(false);}}>{item.label}</button>)}</nav>
+      <nav aria-label="Main navigation">{['overview','agents','strategies','portfolio','options-telemetry','trading','risk-configuration','connections','simulation','notifications'].map(id=>nav.find(n=>n.id===id)!).map((item) => { const Icon = item.icon; return <button key={item.id} aria-current={view === item.id ? 'page' : undefined} className={view === item.id ? 'active' : ''} onClick={() => { setView(item.id); setRailOpen(false); }}><Icon size={17} /><span>{item.label}</span>{item.id === 'risk' && dashboard.recentRisks.length > 0 ? <i>{dashboard.recentRisks.length}</i> : null}</button>; })}<button aria-expanded={advanced} onClick={()=>setAdvanced(!advanced)}><Settings size={17}/><span>More tools</span><span>{advanced?'-':'+'}</span></button>{advanced&&nav.filter(n=>!['overview','agents','strategies','portfolio','options-telemetry','trading','risk-configuration','connections','simulation','notifications'].includes(n.id)).map(item=><button key={item.id} className={view===item.id?'active':''} onClick={()=>{setView(item.id);setRailOpen(false);}}>{item.label}</button>)}</nav>
       <div className="rail-status"><div><span className={`live-dot ${dashboard.health.status}`} /><b>{dashboard.health.status}</b></div><small>{dashboard.health.ready ? 'Manager online' : 'Starting services'}</small></div>
     </aside>
     <section className="app-main">
@@ -79,7 +80,7 @@ export function ControlRoom({ initial, onLogout }: { initial: Dashboard; onLogou
         {view==='acceptance'&&<><AcceptancePanel notify={notify}/><details className="panel product-card"><summary>Advanced commissioning evidence</summary><ManualPreviewEvidence notify={notify}/><PiOperatorEvidence notify={notify}/></details><details className="panel product-card"><summary>Emergency controls & recovery</summary><EmergencyControls notify={notify}/></details></>}
         {view==='trading'&&<TradingWorkspace notify={notify}/>}
         {view === 'overview' && <AccountExperience dashboard={dashboard} section="account" navigate={setView} openChat={()=>setChatOpen(true)}/>}
-        {view === 'agents' && <AgentsView {...shared} />}
+        {view === 'agents' && <CodexTasks notify={notify} />}
         {view === 'strategies' && <AccountExperience dashboard={dashboard} section="strategies" navigate={setView} openChat={()=>setChatOpen(true)}/>}
         {view === 'watchlists' && <WatchlistsView {...shared} />}
         {view === 'risk' && <RiskView {...shared} />}
@@ -90,7 +91,7 @@ export function ControlRoom({ initial, onLogout }: { initial: Dashboard; onLogou
         {view === 'settings' && <SettingsView {...shared} />}
       </div>
     </section>
-    <button aria-label="Open trading agent" className="chat-fab" onClick={() => setChatOpen(true)}><MessageSquareText size={18} /><span>Ask the assistant</span></button>
+    <button aria-label="Open trading agent" className="chat-fab" onClick={() => setChatOpen(true)}><MessageSquareText size={18} /><span>Ask Codex</span></button>
     <AgentChat open={chatOpen} close={() => setChatOpen(false)} refresh={refresh} notify={notify} />
     {toast && <div role="status" className={`toast ${toast.tone}`}><Wifi size={16} /><span>{toast.message}</span></div>}
   </main>;

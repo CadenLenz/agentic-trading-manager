@@ -140,3 +140,5 @@ body { background: radial-gradient(circle at 86% 0, #2b211a 0, transparent 28%),
 .terminal-panel progress { width: 100%; height: 6px; accent-color: var(--copper); }
 @media (max-width: 1180px) { .simulation-grid { grid-template-columns: 180px minmax(0,1fr); } .simulation-grid > section:last-child { grid-column: 1 / -1; } .simulation-feed { max-height: 180px; } .topbar-actions .system-test-button { display: none; } }
 @media (max-width: 700px) { .simulation-grid, .terminal-card-grid, .risk-settings-grid { grid-template-columns: minmax(0,1fr); } .terminal-panel { padding: 16px; } .simulation-grid > section:last-child { grid-column: auto; } .terminal-stats { gap: 16px; } .assertion-list > div { flex-wrap: wrap; } }
+
+.codex-task-result{padding:20px 0;border-top:1px solid #ffffff18}.codex-task-result header{display:flex;justify-content:space-between;gap:16px}.codex-tasks pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:400px;overflow:auto}.codex-tasks textarea{width:100%;box-sizing:border-box}.codex-tasks details{margin-top:12px}.codex-tasks small{color:#999}.codex-tasks .assistant-prompts{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}

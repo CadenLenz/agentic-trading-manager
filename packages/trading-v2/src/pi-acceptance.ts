@@ -9,7 +9,7 @@ import Database from 'better-sqlite3';
 import type {AppDatabase} from '../../database/src/database.js';
 import {makeId,nowIso} from '../../core/src/utils.js';
 import {hasVerifiedPreview} from './commissioning.js';
-import {hasOpenAIModelEvidence} from './connector-evidence.js';
+import {WorkerClient} from '../../agents/src/worker-client.js';
 const exec=promisify(execFile);
 export const manualAcceptanceCheck=z.enum(['Authenticated SSE reconnect','Private tailnet device reachability','Log rotation and reboot recovery']);
 export const acceptanceEvidenceSchema=z.object({name:manualAcceptanceCheck,hostFingerprint:z.string().length(64),observedAt:z.string().datetime(),reference:z.string().min(20).max(2000),confirmation:z.literal('I VERIFIED THIS ON THE ACTUAL PI')}).strict();
@@ -32,7 +32,7 @@ export class PiAcceptanceService{
     add('Schema migration 4',(this.db.raw.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as {v:number}).v===4,'Expected schema version 4');
     add('Scheduler persisted',(this.db.raw.prepare('SELECT COUNT(*) AS n FROM scheduler_jobs_v2').get() as {n:number}).n>=5,'DB job definitions');
     const statuses=(this.db.raw.prepare('SELECT body_json FROM connector_status').all() as Array<{body_json:string}>).map(r=>JSON.parse(r.body_json));
-    add('OpenAI model access',hasOpenAIModelEvidence(this.db),'Requires explicit no-generation model access test');add('Robinhood READ access',statuses.some(s=>s.id==='ROBINHOOD'&&s.state==='READ_ONLY'),'Requires official OAuth/discovery/read validation');
+    try{const worker=await new WorkerClient().health();add('Codex worker with ChatGPT',worker.usable,'Worker CLI '+worker.version,false);}catch{add('Codex worker with ChatGPT',false,'Worker unavailable; deterministic controls remain independent',false);}add('Robinhood READ access',statuses.some(s=>s.id==='ROBINHOOD'&&s.state==='READ_ONLY'),'Requires official OAuth/discovery/read validation');
     add('READ_ONLY reconciliation',this.db.getMode()==='READ_ONLY'&&this.db.getSetting('reconciliation_clear',false)&&this.db.getSetting<string>('broker_verification_mode_v2','SIMULATION')==='READ_ONLY','Actual account facts required');
     add('Manual preview verified',hasVerifiedPreview(this.db),'Requires fresh account/catalog/configuration/proposal version/hash-bound operator preview evidence');
     for(const name of manualAcceptanceCheck.options){const evidence=this.db.getSetting<z.infer<typeof acceptanceEvidenceSchema>&{actor:string}|null>('pi_manual_evidence:'+name,null),valid=!!evidence&&evidence.hostFingerprint===this.fingerprint()&&Date.now()-Date.parse(evidence.observedAt)<86400000&&Date.parse(evidence.observedAt)<=Date.now()+5000;checks.push({name,status:valid?'PASS':'UNAVAILABLE',required:true,detail:valid?'Operator observation by '+evidence.actor+': '+evidence.reference:'Requires actual authenticated reconnect, second-device or reboot/log observation; submit scoped operator evidence and rerun, never inferred from configuration'});}

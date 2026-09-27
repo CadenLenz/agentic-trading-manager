@@ -50,6 +50,6 @@ Migrate → authenticate official connectors and install a reviewed mapping → 
 
 Aliases: `scripts/install-pi.sh REVIEWED_REF`, `scripts/update-pi.sh REVIEWED_REF`, `scripts/health-check.sh`, `scripts/backup-db.sh`. Install/update retain the reviewed-reference requirement. See [TAILSCALE.md](TAILSCALE.md) for private Serve networking and [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) for acceptance/evidence. `npm run pi:acceptance` checks the actual DATA_DIR database/host without placing trades; run it on the Pi, not on developer fixture data expecting a certification.
 
-Pi installation/update scripts have not been executed on physical Raspberry Pi hardware in this Windows development session. Hardware/systemd, native ARM64 SQLite build, HTTPS and rollback execution remain deployment acceptance work.
+The final Codex worker deployment uses the same reviewed updater plus `pi-worker-install.sh`. See [worker operations](CODEX_WORKER.md) for service identities, permissions, recovery and read-only verification. Deployment evidence is recorded separately; configuration alone is not hardware acceptance.
 
 Protect and back up the encrypted connector credential files alongside the private server environment and the unchanged SESSION_SECRET needed to decrypt them. SQLite backups alone do not contain those credentials. Review any secret rotation with a deliberate connector reauthentication/reconfiguration plan; never expose vault files or environment values to React, logs or Git.

@@ -1,3 +1,4 @@
+import {CodexTaskService} from '../../agents/src/task-service.js';
 import { existsSync } from 'node:fs';
 import { join,dirname } from 'node:path';
 import {tmpdir} from 'node:os';
@@ -32,7 +33,8 @@ import {PortfolioAnalytics} from '../../trading-v2/src/analytics.js';
 import {NotificationService} from '../../trading-v2/src/notifications.js';
 import {ConnectorService} from '../../trading-v2/src/connectors.js';
 import {FullSystemSimulation} from '../../trading-v2/src/system-simulation.js';
-import {ProductionReadiness,PREPRODUCTION_LIVE_LOCK} from '../../trading-v2/src/readiness.js';
+import {enforceSafeStartup} from '../../trading-v2/src/safe-startup.js';
+import {ProductionReadiness} from '../../trading-v2/src/readiness.js';
 import {PiAcceptanceService} from '../../trading-v2/src/pi-acceptance.js';
 import {BrokerEventService} from '../../trading-v2/src/broker-events.js';
 import {OperationalNotificationMonitor} from '../../trading-v2/src/operational-monitor.js';
@@ -47,6 +49,7 @@ export class AgenticManager {
   readonly market: MarketDataProvider;
   readonly simulation: SimulationBroker;
   readonly codex: CodexRunner;
+  readonly codexTasks: CodexTaskService;
   readonly robinhood: RobinhoodMcpAdapter;
   readonly execution: ExecutionEngine;
   readonly reconciliation: ReconciliationEngine;
@@ -108,6 +111,8 @@ export class AgenticManager {
         if(event)this.notifications.emit(p.id+':'+state+':'+String(this.database.raw.prepare('SELECT COUNT(*) AS n FROM fills').get()&&(this.database.raw.prepare('SELECT COUNT(*) AS n FROM fills').get() as {n:number}).n),event,state==='RECONCILIATION_REQUIRED'?'CRITICAL':'INFO',{summary:p.symbol+' '+state,proposalId:p.id});
       }else{if(kind==='RECONCILED')this.analytics.snapshot('RECONCILIATION');this.notifications.emit(kind+':'+nowIso(),kind,kind==='RECONCILIATION_FAILURE'?'CRITICAL':'INFO',{summary:kind,...detail});}
     }catch{this.database.audit('OBSERVABILITY','EVENT_SIDE_EFFECT_FAILED','system',null,{kind});}};
+    this.codexTasks=new CodexTaskService(this.database,this.proposals);
+    this.codexTasks.runSimulation=actor=>this.fullSimulation.start(actor,0);
     this.tradingAgent=new PersistentTradingAgent(this.database,this.proposals);
     this.tradingAgent.runSimulation=speed=>this.fullSimulation.start('IN_APP_AGENT',speed);
     this.tradingAgent.inspect=area=>{switch(area){case 'RISK_SETTINGS':return {...this.riskConfiguration.current(),descriptors:this.riskConfiguration.descriptors()};case 'CONFIG_HISTORY':return this.riskConfiguration.history();case 'CONNECTORS':return this.connectors.list();case 'HEALTH':return this.health();case 'SCHEDULER':return this.tradingScheduler.list();case 'NOTIFICATIONS':return {preferences:this.notifications.preferences(),events:this.notifications.list()};case 'SIMULATIONS':return this.fullSimulation.list();case 'PROPOSALS':return this.proposals.list();case 'ALLOCATIONS':return ['SAFE_LONG_TERM','AGGRESSIVE_STOCKS','OPTIONS'].map(s=>this.allocation.state(s as import('../../trading-v2/src/model.js').Sleeve));case 'OPTIONS':return this.database.raw.prepare('SELECT * FROM option_positions').all();case 'FILLS':return this.database.raw.prepare('SELECT * FROM fills ORDER BY executed_at DESC LIMIT 100').all();case 'RISK_EVENTS':return this.database.raw.prepare('SELECT * FROM risk_events ORDER BY created_at DESC LIMIT 100').all();default:throw new Error('Unsupported application inspection');}};
@@ -135,7 +140,8 @@ export class AgenticManager {
 
   async start(): Promise<void> {
     this.startedAt = Date.now(); this.ready = false; this.database.setSetting('startup_ready', false);
-    if(this.database.getMode()==='LIVE'&&(PREPRODUCTION_LIVE_LOCK||process.env.TRADING_MODE!=='LIVE'||process.env.ALLOW_LIVE_TRADING!=='true')){this.database.setSetting('operating_mode','READ_ONLY');this.database.setSetting('v2_live_activation',false);this.database.setSetting('live_db_confirmation',false);this.database.setSetting('global_pause',true);}
+    enforceSafeStartup(this.database);
+    this.database.setSetting('codex_reasoning_enabled',false);
     this.directives.expireDue();
     const interrupted=this.database.raw.prepare("SELECT proposal_id FROM executions_v2 WHERE status='PENDING' AND broker_order_id IS NULL").all() as Array<{proposal_id:string}>;
     for(const e of interrupted){if(this.proposals.get(e.proposal_id).state==='EXECUTION_SENT')this.proposals.transition(e.proposal_id,'RECONCILIATION_REQUIRED','STARTUP',{reason:'Interrupted send; never automatically replay placement'});this.database.setSetting('global_pause',true);this.database.setSetting('reconciliation_clear',false);}
@@ -150,28 +156,27 @@ export class AgenticManager {
         this.database.audit('STARTUP', 'BROKER_STARTUP_CHECK_FAILED', 'system', null, { error: error instanceof Error ? error.message : String(error) });
       }
     }
-    if (this.options.startBackgroundServices !== false) { this.jobs.start(); this.watcher.start(); this.scheduler.start(); }
+    if (this.options.startBackgroundServices !== false) { this.jobs.start(); this.watcher.start(); this.scheduler.start(); this.codexTasks.start(); }
     this.ready = true; this.database.setSetting('startup_ready', true);
     this.events.publish({ type: 'SYSTEM_READY', severity: 'INFO', source: 'AGENTIC_MANAGER', payload: { mode: this.database.getMode() } });
   }
 
-  async shutdown(): Promise<void> { this.scheduler.stop(); this.watcher.stop(); this.jobs.stop(); await this.fullSimulation.shutdown(); await this.connectors.robinhood.close(); this.ready = false; this.database.setSetting('startup_ready', false); this.database.close(); }
+  async shutdown(): Promise<void> { await this.codexTasks.stop(); this.scheduler.stop(); this.watcher.stop(); this.jobs.stop(); await this.fullSimulation.shutdown(); await this.connectors.robinhood.close(); this.ready = false; this.database.setSetting('startup_ready', false); this.database.close(); }
 
   health(): HealthReport {
     const mode = this.database.getMode();
     const diskPath = this.options.databasePath === ':memory:' ? this.options.workingDirectory : this.options.databasePath;
-    const codexHealth = this.codex.health();
-    const connectorStates=this.connectors.list(),openaiState=connectorStates.find(c=>c.id==='OPENAI'),brokerState=connectorStates.find(c=>c.id==='ROBINHOOD');
+    const codexTasks=this.codexTasks.list();
+    const connectorStates=this.connectors.list(),brokerState=connectorStates.find(c=>c.id==='ROBINHOOD');
     return {
-      status: this.ready ? (this.database.getSetting<boolean>('reconciliation_clear', false) ? 'healthy' : 'degraded') : 'unhealthy', version: '2.0.0', mode,
+      status: this.ready ? (mode!=='LIVE'||this.database.getSetting<boolean>('reconciliation_clear', false) ? 'healthy' : 'degraded') : 'unhealthy', version: '2.0.0', mode,
       uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1_000), ready: this.ready,
       checks: {
         database: { ok: true, message: 'SQLite available with foreign keys and WAL where persistent.' },
         storage: { ok: diskPath === ':memory:' || existsSync(join(diskPath, '..')) || existsSync(this.options.workingDirectory), message: diskPath },
-        codex: { ok: codexHealth.healthy, message: `${codexHealth.active} active, ${codexHealth.queued} queued` },
+        codex: { ok: !codexTasks.some(t=>t.status==='UNKNOWN'), message: `${codexTasks.filter(t=>t.status==='RUNNING').length} running, ${codexTasks.filter(t=>t.status==='QUEUED').length} queued; optional worker status at /api/v2/codex/status` },
         reconciliation: { ok: this.database.getSetting<boolean>('reconciliation_clear', true), message: this.database.getSetting<boolean>('reconciliation_clear', true) ? 'Clear' : 'Blocked' },
         watcher: { ok: true, message: this.market.name },
-        openai: {ok:openaiState?.state==='CONNECTED',message:openaiState?.state??'DISCONNECTED'},
         revision: {ok:!!process.env.APP_GIT_SHA,message:process.env.APP_GIT_SHA??'Local uncommitted revision; deployed SHA unavailable'},
         schema: {ok:true,message:'Schema '+String((this.database.raw.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as {v:number}).v)},
         broker: {ok:mode==='SIMULATION'||brokerState?.state==='READ_ONLY',message:mode==='SIMULATION'?'Synthetic broker only':brokerState?.state??'DISCONNECTED'},

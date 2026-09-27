@@ -8,6 +8,7 @@ case "$current" in /opt/agentic-trading-manager/releases/*) ;; *) echo "Unexpect
 envfile=/etc/agentic-trading-manager/agentic-trading-manager.env
 test -f "$envfile"
 # Block new execution before fetching or staging an update. A failure leaves the service stopped.
+systemctl stop agentic-codex-worker.service 2>/dev/null || true
 systemctl stop agentic-trading-manager-backup.timer agentic-trading-manager-backup.service agentic-trading-manager
 trap 'systemctl stop agentic-trading-manager || true; echo "Update failed. Service remains stopped; inspect retained releases/backups before recovery. Never start an old binary against a migrated DB automatically."' ERR
 repo="$(mktemp -d /opt/agentic-trading-manager/source-XXXXXX)"
@@ -39,6 +40,7 @@ test ! -e "$next"
 ln -s "$release" "$next"
 mv -T "$next" /opt/agentic-trading-manager/current
 install -m 0644 systemd/agentic-trading-manager.service systemd/agentic-trading-manager-backup.service systemd/agentic-trading-manager-backup.timer /etc/systemd/system/
+bash scripts/pi-worker-install.sh
 systemctl daemon-reload
 systemctl start agentic-trading-manager
 if ! curl --retry 10 --retry-delay 2 --retry-connrefused --fail --silent http://127.0.0.1:4010/health; then systemctl stop agentic-trading-manager; echo "Health check failed; service stopped."; exit 1; fi

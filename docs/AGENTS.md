@@ -1,3 +1,7 @@
+# Current reasoning architecture
+
+Dashboard reasoning now uses the isolated authenticated Codex worker described in [CODEX_WORKER.md](CODEX_WORKER.md). Historical logical-agent details below remain for deterministic simulation. Ambient model invocation is disabled; explicit requests and approved local schedules use the durable task queue. No automatic retries or API fallback.
+
 # Agent system
 
 ## Logical agents
