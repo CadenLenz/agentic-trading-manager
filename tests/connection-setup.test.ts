@@ -42,7 +42,9 @@ describe('Connection setup recovery',()=>{
       const raw=setup.headers['set-cookie'];const cookie=(Array.isArray(raw)?raw[0]:raw)!.split(';')[0]!;const headers={cookie,'x-csrf-token':setup.json().csrf as string};
       expect((await app.inject({method:'POST',url:'/api/v2/connections/robinhood/connect',headers:{cookie},payload:{}})).statusCode).toBe(403);
       expect((await app.inject({method:'POST',url:'/api/v2/connections/robinhood/connect',headers,payload:{}})).statusCode).toBe(403);
+      expect((await app.inject({method:'POST',url:'/api/v2/connections/robinhood/disconnect',headers,payload:{confirmation:'FORGET ROBINHOOD AUTHORIZATION'}})).statusCode).toBe(403);
       await app.inject({method:'POST',url:'/api/v2/reauth',headers,payload:{password:'only-for-isolated-tests'}});
+      expect((await app.inject({method:'POST',url:'/api/v2/connections/robinhood/disconnect',headers,payload:{confirmation:'wrong'}})).statusCode).toBe(400);
       const credential=await app.inject({method:'POST',url:'/api/v2/connections/openai/connect',headers,payload:{key:'synthetic-local-test-key-only',model:'gpt-5.5',confirmation:OPENAI_CONNECTION_CONFIRMATION}});
       expect(credential.statusCode).toBe(200);expect(credential.json()).toMatchObject({configured:true,tested:false,paidCalls:0});expect(credential.body).not.toContain('synthetic-local-test-key-only');
       const failure=await app.inject({method:'POST',url:'/api/v2/connections/robinhood/connect',headers,payload:{}});
