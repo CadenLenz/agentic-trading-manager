@@ -1,6 +1,6 @@
 # Codex worker architecture and operations
 
-The app runs as `agentic-trader`; the reasoning worker runs as `cadenlenz`, using that user's existing ChatGPT login and Codex-managed Robinhood OAuth. Credentials are never copied into the application or its database. The app cannot read the worker's home. Release code is root-owned so the app cannot change code executed by the more privileged worker.
+The app runs as `agentic-trader`; the reasoning worker runs as `cadenlenz`, using that user's existing ChatGPT login and Codex-managed Robinhood OAuth. Credentials are never copied into the application or its database. The app cannot read the worker's home. The worker has a read-only home view for the existing OS credential-store lookup, with writes limited to its Codex directory and worker state. Masking its home with tmpfs was verified to hide the existing Robinhood OAuth session; no credentials are copied. Release code is root-owned so the app cannot change code executed by the more privileged worker.
 
 The only IPC is `/run/agentic-codex-worker/worker.sock`, mode 0660 inside a 0750 directory owned by the worker and the dedicated `agentic-codex` group. The app receives that supplementary group through its systemd drop-in. No network listener or Funnel is added. The worker cannot access the trading database, backups, or environment file. Its own SQLite queue is under `/var/lib/agentic-codex-worker`, mode 0700.
 
