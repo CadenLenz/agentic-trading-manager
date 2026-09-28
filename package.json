@@ -2,7 +2,9 @@
   "name": "agentic-trading-manager",
   "version": "2.0.0",
   "private": true,
-  "overrides": { "esbuild": "0.28.2" },
+  "overrides": {
+    "esbuild": "0.28.2"
+  },
   "type": "module",
   "description": "Simulation-first autonomous multi-strategy trading control plane for Raspberry Pi.",
   "engines": {
@@ -12,7 +14,7 @@
     "dev": "concurrently -k -n API,WEB -c blue,green \"npm:dev:api\" \"npm:dev:web\"",
     "dev:web": "vite --host 127.0.0.1",
     "dev:api": "node --watch --import tsx apps/api/src/index.ts",
-    "build": "npm run build:web && npm run build:api",
+    "build": "npm run build:web && npm run build:api && npm run build:worker",
     "build:web": "vite build",
     "build:api": "tsup apps/api/src/index.ts --format esm --platform node --target node22 --out-dir dist/api --clean --sourcemap",
     "start": "node dist/api/index.js",
@@ -26,7 +28,8 @@
     "test:system": "tsx scripts/full-system-test.ts",
     "pi:acceptance": "tsx scripts/pi-acceptance.ts",
     "upgrade:safe": "tsx scripts/upgrade-safe.ts",
-    "security:audit": "npm audit --omit=dev"
+    "security:audit": "npm audit --omit=dev",
+    "build:worker": "tsup apps/worker/src/index.ts --format esm --platform node --target node22 --out-dir dist/worker --clean --sourcemap"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

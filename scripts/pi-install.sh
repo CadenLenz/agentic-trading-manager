@@ -29,6 +29,7 @@ runuser -u agentic-trader -- npm test
 runuser -u agentic-trader -- npm run self-test
 runuser -u agentic-trader -- npm run test:system
 runuser -u agentic-trader -- npm run build
+test -f dist/worker/index.js
 runuser -u agentic-trader -- npm audit --omit=dev
 envfile="/etc/agentic-trading-manager/agentic-trading-manager.env"
 if [[ -e "$envfile" ]]; then echo "Existing environment file found; preserve it and finish installation manually."; exit 1; fi

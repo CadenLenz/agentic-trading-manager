@@ -28,6 +28,7 @@ runuser -u agentic-trader -- npm test
 runuser -u agentic-trader -- npm run self-test
 runuser -u agentic-trader -- npm run test:system
 runuser -u agentic-trader -- npm run build
+test -f dist/worker/index.js
 runuser -u agentic-trader -- npm audit --omit=dev
 # Service and backup timer have remained stopped throughout staging.
 # Revoke deployment LIVE gates even if a later database step fails. Never source an environment file as root.
