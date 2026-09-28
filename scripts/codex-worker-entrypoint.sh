@@ -9,7 +9,7 @@ fi
 
 credential="${CREDENTIALS_DIRECTORY:?systemd credential directory is required}/keyring-passphrase"
 test -r "$credential"
-test "$(stat -c %a "$credential")" = "400"
+case "$(stat -c %a "$credential")" in 400|440) ;; *) echo 'Unsafe systemd credential permissions' >&2; exit 1;; esac
 install -d -m 0700 "$XDG_DATA_HOME/keyrings"
 /usr/bin/gnome-keyring-daemon --unlock --components=secrets < "$credential" >/dev/null
 
