@@ -12,9 +12,11 @@ export type WorkerStatus='QUEUED'|'RUNNING'|'COMPLETED'|'FAILED'|'CANCELLED'|'TI
 export interface WorkerJob{id:string;status:WorkerStatus;createdAt:string;startedAt:string|null;endedAt:string|null;response:TaskResponse|null;error:string|null;stdout:string;stderr:string;version:string|null;hash:string|null;durationMs:number|null}
 export function failureCode(error:unknown):WorkerStatus{const text=String(error);return /usage.limit|quota|rate.limit|insufficient_quota|usage cap|credits|exceeded.*limit/i.test(text)?'BLOCKED_USAGE_LIMIT':/timed out/i.test(text)?'TIMED_OUT':/^(?:Error: )?Codex run cancel(?:ed|led)/i.test(text)?'CANCELLED':'FAILED';}
 export async function probeCodex(binary=process.env.CODEX_BIN??'codex'){
-  const run=async(args:string[])=>{try{const p=await exec(binary,args,{timeout:10000,maxBuffer:200000,env:safeCodexEnvironment()});return p.stdout+p.stderr;}catch{return '';}};
-  const [version,login,mcp,help]=await Promise.all([run(['--version']),run(['login','status']),run(['mcp','list','--json']),run(['exec','--help'])]);
+  // Stay below the IPC deadline even when a locked desktop keyring blocks auth lookup.
+  const run=async(args:string[])=>{try{const p=await exec(binary,args,{timeout:5000,maxBuffer:200000,env:safeCodexEnvironment()});return p.stdout+p.stderr;}catch{return '';}};
+  const [version,login,mcp,help,mcpConfig]=await Promise.all([run(['--version']),run(['login','status']),run(['mcp','list','--json']),run(['exec','--help']),run(['mcp','get','robinhood-trading','--json'])]);
   let configured=false,auth='Unavailable';try{const rows=JSON.parse(mcp) as Array<{name:string;enabled:boolean;auth_status:string}>;const rh=rows.find(r=>r.name==='robinhood-trading'&&r.enabled);configured=!!rh;auth=rh?.auth_status==='o_auth'?'OAuth configured; session checked on use':rh?'Needs login':'Unavailable';}catch{/* CLI absent */}
+  if(!mcp){try{const c=JSON.parse(mcpConfig) as {name:string;enabled:boolean};if(c.name==='robinhood-trading'&&c.enabled){configured=true;auth='Needs credential-store unlock or login; OAuth status unavailable';}}catch{/* Configuration unavailable */}}
   const installed=/codex-cli\s+[\d.]+/.test(version),loggedIn=/Logged in using ChatGPT/i.test(login),compatible=['--strict-config','--ignore-user-config','--ignore-rules','--output-schema','--ephemeral','--model'].every(flag=>help.includes(flag));
   return {installed,version:version.match(/codex-cli\s+[\w.+-]+/)?.[0]??null,loggedIn,compatible,usable:installed&&loggedIn&&compatible,robinhood:{configured,status:auth},checkedAt:new Date().toISOString()};
 }

@@ -42,4 +42,6 @@ The socket check needs the dedicated group; a login shell does not inherit the s
 
 If ChatGPT auth expires, the operator runs `codex login --device-auth` as `cadenlenz`. If broker auth expires, the operator runs `codex mcp login robinhood-trading` as `cadenlenz` and completes provider interaction. Never copy tokens, automate passkeys, or ask for broker credentials. Neither provider outage prevents STOP, pause, dashboard, stored reports or deterministic controls.
 
+After a cold boot, the Pi's desktop Default Keyring may remain locked. Unlock that existing keyring in the `cadenlenz` desktop credential manager to restore Robinhood OAuth lookup; do not export credentials or store an unlock password in systemd. The worker reports a credential-store unlock/login requirement without blocking ChatGPT-only tasks. Services, persisted tasks, and safe startup recover independently of this operator-controlled credential store.
+
 Legacy API transport is retained only for explicit compatibility (`ENABLE_LEGACY_OPENAI_API=true`); no production route selects it. Legacy connection metadata is not readiness evidence. Normal operation uses no OpenAI API key and no API inference.
