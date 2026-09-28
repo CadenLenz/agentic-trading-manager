@@ -11,7 +11,11 @@ credential="${CREDENTIALS_DIRECTORY:?systemd credential directory is required}/k
 test -r "$credential"
 case "$(stat -c %a "$credential")" in 400|440) ;; *) echo 'Unsafe systemd credential permissions' >&2; exit 1;; esac
 install -d -m 0700 "$XDG_DATA_HOME/keyrings"
-/usr/bin/gnome-keyring-daemon --unlock --components=secrets < "$credential" >/dev/null
+control_dir="$(mktemp -d "${TMPDIR:-/tmp}/agentic-keyring.XXXXXX")"
+/usr/bin/gnome-keyring-daemon \
+  --control-directory="$control_dir" \
+  --unlock \
+  --components=secrets < "$credential" >/dev/null
 
 if (($#)); then exec "$@"; fi
 exec /usr/bin/node /opt/agentic-trading-manager/current/dist/worker/index.js
