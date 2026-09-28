@@ -15,6 +15,7 @@ systemd-run --quiet --wait --collect --pty \
   --property=Environment=XDG_DATA_HOME=/var/lib/agentic-codex-worker/xdg \
   --property=LoadCredentialEncrypted=keyring-passphrase:/etc/credstore.encrypted/agentic-codex-worker-keyring-passphrase \
   --property=NoNewPrivileges=yes \
+  --property=PrivateTmp=yes \
   --property=ProtectSystem=strict \
   --property=ProtectHome=read-only \
   --property=BindPaths=/home/cadenlenz/.codex \
