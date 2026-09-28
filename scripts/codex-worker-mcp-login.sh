@@ -21,4 +21,4 @@ systemd-run --quiet --wait --collect --pty \
   --property='ReadWritePaths=/var/lib/agentic-codex-worker /home/cadenlenz/.codex' \
   --property='InaccessiblePaths=/var/lib/agentic-trading-manager /etc/agentic-trading-manager /var/backups/agentic-trading-manager' \
   /usr/local/libexec/agentic-codex-worker-entrypoint \
-  /usr/bin/codex -c 'mcp_oauth_credentials_store="keyring"' mcp login robinhood-trading
+  /usr/bin/codex -c 'mcp_oauth_credentials_store="keyring"' -c mcp_oauth_callback_port=4321 mcp login robinhood-trading
