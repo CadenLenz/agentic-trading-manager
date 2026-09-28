@@ -113,7 +113,7 @@ export class CodexRunner {
 // Fixed capabilities, never accepted from an HTTP request or user prose.
 export const BROKER_READ_TOOLS=['get_accounts','get_portfolio','get_equity_positions','get_option_positions','get_equity_orders','get_option_orders','get_equity_quotes','get_option_quotes','get_option_instruments','get_option_chains','get_equity_fundamentals','get_equity_news','get_financials','get_earnings_results','get_earnings_calendar','get_equity_technical_indicators','get_equity_historicals','get_option_historicals'];
 export function isolatedConfig(request:{model?:string|null;effort?:string|null;robinhoodReads?:boolean}){
-  const config=['approval_policy="never"','forced_login_method="chatgpt"','model_provider="openai"','web_search="disabled"','project_doc_max_bytes=0','features.skip_host_skill_discovery=true',
+  const config=['approval_policy="never"','forced_login_method="chatgpt"','model_provider="openai"','mcp_oauth_credentials_store="keyring"','web_search="disabled"','project_doc_max_bytes=0','features.skip_host_skill_discovery=true',
     ...['shell_tool','unified_exec','apps','plugins','hooks','multi_agent','multi_agent_v2','code_mode','code_mode_host','computer_use','browser_use','browser_use_external','browser_use_full_cdp_access','in_app_browser','memories','skill_search','skill_mcp_dependency_install','image_generation','view_image'].map(k=>'features.'+k+'=false')];
   if(request.robinhoodReads)config.push('mcp_servers.robinhood-trading.url="https://agent.robinhood.com/mcp/trading"','mcp_servers.robinhood-trading.enabled_tools='+JSON.stringify(BROKER_READ_TOOLS),'mcp_servers.robinhood-trading.startup_timeout_sec=15');
   if(request.effort)config.push('model_reasoning_effort='+JSON.stringify(request.effort));

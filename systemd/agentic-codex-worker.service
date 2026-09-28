@@ -13,7 +13,9 @@ Environment=CODEX_HOME=/home/cadenlenz/.codex
 Environment=CODEX_BIN=/usr/bin/codex
 Environment=CODEX_WORKER_DATA=/var/lib/agentic-codex-worker
 Environment=CODEX_WORKER_SOCKET=/run/agentic-codex-worker/worker.sock
-ExecStart=/usr/bin/node /opt/agentic-trading-manager/current/dist/worker/index.js
+Environment=XDG_DATA_HOME=/var/lib/agentic-codex-worker/xdg
+LoadCredentialEncrypted=keyring-passphrase:/etc/credstore.encrypted/agentic-codex-worker-keyring-passphrase
+ExecStart=/usr/local/libexec/agentic-codex-worker-entrypoint
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20
