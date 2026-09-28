@@ -12,7 +12,7 @@ export const taskResponse=z.object({
   kind:z.enum(['NaturalLanguageResponse','AccountSummary','ResearchResult','StrategyReview','TradeProposal','RiskChangeProposal','ExecutionRequest','DailyReport','WeeklyReport']),
   message:z.string().min(1).max(20000),
   sources:z.array(z.object({source:z.string().max(1000),observedAt:z.string().datetime(),summary:z.string().max(2000)}).strict()).max(30),
-  action:z.discriminatedUnion('intent',[
+  action:z.union([
     z.object({intent:z.literal('pause_strategy'),strategy:sleeveSchema,reason:z.string().min(3).max(2000)}).strict(),
     z.object({intent:z.literal('pause_all'),reason:z.string().min(3).max(2000)}).strict(),
     z.object({intent:z.literal('risk_change_proposal'),changes:z.array(riskEditSchema).min(1).max(30),reason:z.string().min(20).max(2000)}).strict(),

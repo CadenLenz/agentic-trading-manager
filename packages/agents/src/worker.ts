@@ -10,7 +10,7 @@ import {stableHash} from '../../core/src/utils.js';
 const exec=(file:string,args:string[],options:{timeout:number;maxBuffer:number;env:NodeJS.ProcessEnv})=>new Promise<{stdout:string;stderr:string}>((resolve,reject)=>{execFile(file,args,options,(error,stdout,stderr)=>error?reject(error):resolve({stdout,stderr}));});
 export type WorkerStatus='QUEUED'|'RUNNING'|'COMPLETED'|'FAILED'|'CANCELLED'|'TIMED_OUT'|'BLOCKED_USAGE_LIMIT'|'UNKNOWN';
 export interface WorkerJob{id:string;status:WorkerStatus;createdAt:string;startedAt:string|null;endedAt:string|null;response:TaskResponse|null;error:string|null;stdout:string;stderr:string;version:string|null;hash:string|null;durationMs:number|null}
-export function failureCode(error:unknown):WorkerStatus{const text=String(error);return /usage.limit|quota|rate.limit|insufficient_quota|usage cap|credits|exceeded.*limit/i.test(text)?'BLOCKED_USAGE_LIMIT':/timed out/i.test(text)?'TIMED_OUT':/cancel/i.test(text)?'CANCELLED':'FAILED';}
+export function failureCode(error:unknown):WorkerStatus{const text=String(error);return /usage.limit|quota|rate.limit|insufficient_quota|usage cap|credits|exceeded.*limit/i.test(text)?'BLOCKED_USAGE_LIMIT':/timed out/i.test(text)?'TIMED_OUT':/^(?:Error: )?Codex run cancel(?:ed|led)/i.test(text)?'CANCELLED':'FAILED';}
 export async function probeCodex(binary=process.env.CODEX_BIN??'codex'){
   const run=async(args:string[])=>{try{const p=await exec(binary,args,{timeout:10000,maxBuffer:200000,env:safeCodexEnvironment()});return p.stdout+p.stderr;}catch{return '';}};
   const [version,login,mcp,help]=await Promise.all([run(['--version']),run(['login','status']),run(['mcp','list','--json']),run(['exec','--help'])]);
@@ -45,7 +45,7 @@ export class CodexWorker {
     const health=await this.health();if(!health.usable)throw new Error('CODEX_UNAVAILABLE: ChatGPT login and compatible CLI required');job.version=health.version;
     const result=await this.runner.run({requestId:task.id,agent:'bounded reasoning worker',prompt:taskPrompt(task),schema:z.toJSONSchema(taskResponse,{target:'draft-7'}),validate:value=>taskResponse.parse(value),workingDirectory:this.directory,timeoutMs:task.settings.timeoutMs,signal:controller.signal,model:task.settings.model,effort:task.settings.effort,robinhoodReads:health.robinhood.configured});
     validateAuthority(task,result.value);job.response=result.value;job.hash=stableHash(result.value);job.stdout=scrubLog(String(result.metadata.stdout??''));job.stderr=scrubLog(result.stderr);job.durationMs=result.durationMs;job.status='COMPLETED';
-  }catch(error){job.status=failureCode(error);job.error=job.status==='BLOCKED_USAGE_LIMIT'?'Codex usage is currently unavailable. This task was not run.':scrubLog(String(error)).slice(0,2000);}
+  }catch(error){if(error&&typeof error==='object'){if('stdout' in error)job.stdout=scrubLog(String(error.stdout));if('stderr' in error)job.stderr=scrubLog(String(error.stderr));}job.status=failureCode(error);job.error=job.status==='BLOCKED_USAGE_LIMIT'?'Codex usage is currently unavailable. This task was not run.':scrubLog(String(error)).slice(-2000);}
     finally{if(this.get(job.id).status==='CANCELLED'){job.status='CANCELLED';job.response=null;}job.endedAt=new Date().toISOString();this.save(job);this.active.delete(job.id);}
   }
   async stop(){this.closed=true;if(this.timer)clearInterval(this.timer);for(const controller of this.active.values())controller.abort();while(this.active.size)await new Promise(r=>setTimeout(r,20));}

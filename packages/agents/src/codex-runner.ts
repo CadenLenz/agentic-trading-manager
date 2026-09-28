@@ -57,7 +57,7 @@ export class CodexRunner {
     const schemaPath = join(directory, 'schema.json');
     const outputPath = join(directory, 'output.json');
     await writeFile(schemaPath, JSON.stringify(request.schema), { mode: 0o600 });
-      const args = ['exec', '--strict-config', '--ignore-user-config', '--ignore-rules', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only', '--color', 'never', '--output-schema', schemaPath, '--output-last-message', outputPath, '--cd', resolve(request.workingDirectory), '-'];
+      const args = ['exec', '--json', '--strict-config', '--ignore-user-config', '--ignore-rules', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only', '--color', 'never', '--output-schema', schemaPath, '--output-last-message', outputPath, '--cd', resolve(request.workingDirectory), '-'];
       args.splice(args.length-1,0,...isolatedConfig(request));
       const prompt = [
         `You are the ${request.agent} logical agent inside Agentic Trading Manager.`,
@@ -81,7 +81,7 @@ export class CodexRunner {
       let settled = false;
       const finish = (error?: Error, exitCode = -1): void => {
         if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort);
-        if (error) reject(error); else if (exitCode !== 0) reject(new Error(`Codex exited ${exitCode}: ${scrubLog((stderr+stdout).slice(-4_000))}`));
+        if (error) reject(error); else if (exitCode !== 0) reject(Object.assign(new Error(`Codex exited ${exitCode}: ${processDiagnostic(stderr,stdout)}`),{stdout:scrubLog(stdout),stderr:scrubLog(stderr)}));
         else resolvePromise({ exitCode, stderr: scrubLog(stderr), stdout:scrubLog(stdout) });
       };
       const kill = (): void => { try{if(process.platform!=='win32'&&child.pid)process.kill(-child.pid,'SIGKILL');else child.kill('SIGKILL');}catch{/* already exited */} };
@@ -125,3 +125,8 @@ export function safeCodexEnvironment(){
   return env;
 }
 export function scrubLog(value:string){return value.replace(/(?:Bearer\s+)[^\s"']+/gi,'Bearer [REDACTED]').replace(/(?:sk-|sk-proj-)[a-zA-Z0-9_-]+/g,'[REDACTED]').replace(/eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/g,'[REDACTED]');}
+
+export function processDiagnostic(stderr:string,stdout:string){
+  for(const line of stdout.split('\n').reverse())try{const event=JSON.parse(line);if(event.type==='error'||event.type==='turn.failed')return scrubLog(String(event.message??event.error?.message??'Codex task failed')).slice(-1500);}catch{/* non-JSON diagnostic */}
+  const marker=stderr.lastIndexOf('ERROR:');return scrubLog((marker>=0?stderr.slice(marker):stderr||stdout).slice(-1500));
+}
