@@ -121,7 +121,7 @@ export function isolatedConfig(request:{model?:string|null;effort?:string|null;r
 }
 export function safeCodexEnvironment(){
   const env:NodeJS.ProcessEnv={NO_COLOR:'1'};
-  for(const key of ['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TMPDIR','SYSTEMROOT','WINDIR','USERPROFILE','APPDATA','LOCALAPPDATA','CODEX_HOME'])if(process.env[key])env[key]=process.env[key];
+  for(const key of ['PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TMPDIR','SYSTEMROOT','WINDIR','USERPROFILE','APPDATA','LOCALAPPDATA','CODEX_HOME','DBUS_SESSION_BUS_ADDRESS','XDG_DATA_HOME'])if(process.env[key])env[key]=process.env[key];
   return env;
 }
 export function scrubLog(value:string){return value.replace(/(?:Bearer\s+)[^\s"']+/gi,'Bearer [REDACTED]').replace(/(?:sk-|sk-proj-)[a-zA-Z0-9_-]+/g,'[REDACTED]').replace(/eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/g,'[REDACTED]');}
