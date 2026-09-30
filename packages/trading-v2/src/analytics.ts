@@ -6,6 +6,7 @@ import {pacificPeriodStart} from './periods.js';
 import {SLEEVES,type TrustedQuote} from './model.js';
 export class PortfolioAnalytics{
   constructor(readonly db:AppDatabase,readonly ledger:VirtualPortfolioLedger,readonly allocation:StrategyAllocationManager){}
+  private verifiedSince(since:string,mode:string,account:string){const opening=this.db.getSetting<{accountId:string;at:string}|null>('initial_account_import_v2',null);return mode!=='SIMULATION'&&opening?.accountId===account&&opening.at>since?opening.at:since;}
   snapshot(reason:string,externalFlow=0,at=nowIso()){
     const sleeves=SLEEVES.map(s=>this.allocation.state(s)),a=this.db.getSetting<{accountId:string;buyingPower:number}|null>('broker_account_v2',null),id=makeId('snapshot');
     const cash=sleeves.reduce((n,s)=>n+s.cash,0),equity=sleeves.reduce((n,s)=>n+s.currentEquity,0);
@@ -18,7 +19,7 @@ export class PortfolioAnalytics{
   }
   series(period='1D',strategy?:string,instrument?:string){
     const days:Record<string,number>={'1D':1,'1W':7,'1M':31,'3M':93,'1Y':366,ALL:36500};if(!(period in days))throw new Error('Unsupported chart period');
-    const since=new Date(Date.now()-days[period]!*86400000).toISOString(),mode=this.db.getMode(),account=mode==='SIMULATION'?'SIMULATION':this.db.getSetting<{accountId:string}|null>('broker_account_v2',null)?.accountId??'UNVERIFIED';
+    const mode=this.db.getMode(),account=mode==='SIMULATION'?'SIMULATION':this.db.getSetting<{accountId:string}|null>('broker_account_v2',null)?.accountId??'UNVERIFIED',since=this.verifiedSince(new Date(Date.now()-days[period]!*86400000).toISOString(),mode,account);
     let rows:Array<{at:string;value:number}>;
     if(instrument)rows=this.db.raw.prepare('SELECT s.created_at AS at,s.value FROM position_snapshots s JOIN portfolio_snapshots p ON p.id=s.portfolio_id WHERE p.mode=? AND p.account_id=? AND s.created_at>=? AND s.strategy_id=? AND s.instrument_id=? ORDER BY s.created_at').all(mode,account,since,strategy,instrument) as typeof rows;
     else if(strategy)rows=this.db.raw.prepare('SELECT s.created_at AS at,s.equity AS value FROM strategy_snapshots s JOIN portfolio_snapshots p ON p.id=s.portfolio_id WHERE p.mode=? AND p.account_id=? AND s.created_at>=? AND s.strategy_id=? ORDER BY s.created_at').all(mode,account,since,strategy) as typeof rows;
@@ -28,6 +29,7 @@ export class PortfolioAnalytics{
   }
   performance(since:string){
     const mode=this.db.getMode(),account=mode==='SIMULATION'?'SIMULATION':this.db.getSetting<{accountId:string}|null>('broker_account_v2',null)?.accountId??'UNVERIFIED';
+    since=this.verifiedSince(since,mode,account);
     const rows=this.db.raw.prepare('SELECT equity,external_flow,created_at FROM portfolio_snapshots WHERE mode=? AND account_id=? AND created_at>=? ORDER BY created_at').all(mode,account,since) as Array<{equity:number;external_flow:number;created_at:string}>;
     if(rows.length<2)return {beginning:null,end:rows.at(-1)?.equity??null,pnl:null,returnPercent:null,coverage:'INSUFFICIENT_SNAPSHOTS'};
     const beginning=rows[0]!.equity,end=rows.at(-1)!.equity,flow=rows.slice(1).reduce((n,r)=>n+r.external_flow,0),pnl=roundMoney(end-beginning-flow);

@@ -1,5 +1,5 @@
 /* Calm, readable product layer. Legacy engineering views remain available. */
-:root { --bg:#141617; --panel:#1b1e20; --line:#303538; --line-bright:#4a5155; --text:#f0f1ed; --muted:#a5adae; --green:#73cf9d; --red:#f28e95; --cyan:#d5b38d; }
+:root { --bg:#141617; --panel:#1b1e20; --line:#303538; --line-bright:#4a5155; --text:#f0f1ed; --muted:#a5adae; --green:#73cf9d; --red:#f28e95; --cyan:#d5b38d; --violet:var(--cyan); --blue:var(--cyan); --amber:var(--cyan); }
 body { background:var(--bg); color:var(--text); font-size:14px; }
 button,input,select,textarea { font:inherit; }
 button,summary,a,input,select,textarea { touch-action:manipulation; }
@@ -565,3 +565,18 @@ input,textarea,select { border:1px solid var(--line-bright); border-radius:7px; 
 .overview-top { align-items:start; }
 .overview-companion .next-step { flex:initial; }
 .account-hero .card-kicker { margin-top:0; }
+
+/* One accent for decorative icons; green and red retain financial meaning. */
+.strategy-symbol, .strategy-symbol.AGGRESSIVE_STOCKS, .strategy-symbol.OPTIONS,
+.strategy-glyph, .strategy-glyph.tone-1, .strategy-glyph.tone-2,
+.timeline-icon, .timeline-icon.orders, .timeline-icon.risks,
+.manager-avatar, .confirm-icon, .connection-state > span {
+  color:var(--cyan); background:#2b2925; border-color:#514b41;
+}
+.agent-card, .agent-card.tone-1, .agent-card.tone-2,
+.comparison-grid article, .comparison-grid article.tone-1, .comparison-grid article.tone-2 { border-top-color:var(--cyan); }
+.reconciliation-comparisons { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:20px; }
+.reconciliation-comparisons article { border-top:1px solid var(--line); padding-top:16px; }
+.opening-holdings, .opening-cash { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; margin:20px 0; }
+.reconciliation-page .field { margin:16px 0; }
+.reconciliation-page .plain-facts { margin-bottom:0; }

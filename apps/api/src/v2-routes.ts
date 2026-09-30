@@ -5,6 +5,8 @@ import type {AgenticManager} from '../../../packages/core/src/agentic-manager.js
 import {SLEEVES,agentModeSchema,sleeveSchema,sleevePolicySchema,accountPolicySchema,DEFAULT_ACCOUNT_POLICY} from '../../../packages/trading-v2/src/model.js';
 import {nowIso} from '../../../packages/core/src/utils.js';
 import {runSelfTests} from '../../../packages/trading-v2/src/self-tests.js';
+import {AccountReconciliationService} from '../../../packages/trading-v2/src/account-reconciliation.js';
+import {requireRecentAuth} from './preproduction-routes.js';
 const actor=(r:FastifyRequest)=>r.authUser!.username;
 const params=(r:FastifyRequest)=>z.object({id:z.string().min(1).max(200)}).parse(r.params).id;
 export function readiness(m:AgenticManager){
@@ -20,6 +22,9 @@ export function readiness(m:AgenticManager){
 }
 export function registerV2(app:FastifyInstance,m:AgenticManager){
   const db=m.database;
+  const reconciliation=new AccountReconciliationService(m.proposals);
+  app.get('/api/v2/reconciliation',()=>reconciliation.report());
+  app.post('/api/v2/reconciliation/import',async r=>{requireRecentAuth(m,actor(r),r.authUser!.csrf);const result=await reconciliation.importOpeningBalance(r.body,actor(r));m.analytics.snapshot('INITIAL_ACCOUNT_IMPORT');return result;});
   app.get('/api/v2/codex/status',()=>m.codexTasks.status());
   app.get('/api/v2/codex/tasks',async()=>m.codexTasks.list());
   app.post('/api/v2/codex/tasks',async r=>{const b=z.object({message:z.string().min(1).max(12000),id:z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/).optional()}).strict().parse(r.body);return m.codexTasks.create(b.message,actor(r),b.id?{id:b.id}:undefined);});

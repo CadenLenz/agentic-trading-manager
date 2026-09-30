@@ -86,6 +86,16 @@ describe('API authentication and confirmation boundaries', () => {
     expect((await app.inject({method:'POST',url:'/api/v2/reauth',headers,payload:{password:'very-secure-password'}})).statusCode).toBe(200);
     expect((await app.inject({method:'POST',url:'/api/v2/sleeves/SAFE_LONG_TERM/policy',headers,payload})).statusCode).toBe(200);
   });
+  it('protects opening-balance import with login, CSRF and a fresh password check',async()=>{
+    expect((await app.inject({method:'GET',url:'/api/v2/reconciliation'})).statusCode).toBe(401);
+    await setupSession(app);
+    const login=await app.inject({method:'POST',url:'/api/auth/login',payload:{username:'operator',password:'very-secure-password'}});
+    const cookies=login.headers['set-cookie'],raw=Array.isArray(cookies)?cookies[0]:cookies;
+    const headers={cookie:raw!.split(';')[0]!,'x-csrf-token':login.json().csrf as string};
+    expect((await app.inject({method:'POST',url:'/api/v2/reconciliation/import',headers:{cookie:headers.cookie},payload:{}})).statusCode).toBe(403);
+    expect((await app.inject({method:'POST',url:'/api/v2/reconciliation/import',headers,payload:{}})).statusCode).toBe(403);
+    expect((await app.inject({method:'GET',url:'/api/v2/reconciliation',headers})).json()).toHaveProperty('positions');
+  });
 });
 
 async function setupSession(app: FastifyInstance): Promise<{ cookie: string; csrf: string }> {
