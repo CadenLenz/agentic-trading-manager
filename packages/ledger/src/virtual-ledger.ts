@@ -4,7 +4,7 @@ import { makeId, nowIso, roundMoney, roundQuantity } from '../../core/src/utils.
 import type { AppDatabase } from '../../database/src/database.js';
 
 interface PositionRow {
-  strategy_id: string; symbol: string; quantity: number; average_cost: number; market_price: number;
+  strategy_id: string; symbol: string; quantity: number; average_cost: number|null; market_price: number;
   sector: string; asset_type: AssetType; updated_at: string;
 }
 
@@ -152,7 +152,7 @@ export class VirtualPortfolioLedger {
     const current = this.getPosition(order.strategy_id as string, order.symbol);
     const oldQuantity = current?.quantity ?? 0;
     const newQuantity = roundQuantity(oldQuantity + fill.quantity);
-    const averageCost = roundMoney(((oldQuantity * (current?.averageCost ?? 0)) + (fill.quantity * fill.price) + fill.fees) / newQuantity);
+    const averageCost = current && current.averageCost===null ? null : roundMoney(((oldQuantity * (current?.averageCost ?? 0)) + (fill.quantity * fill.price) + fill.fees) / newQuantity);
     sqlite.prepare(`INSERT INTO strategy_positions(strategy_id,symbol,quantity,average_cost,market_price,sector,asset_type,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(strategy_id,symbol) DO UPDATE SET quantity=excluded.quantity,average_cost=excluded.average_cost,market_price=excluded.market_price,updated_at=excluded.updated_at`)
       .run(order.strategy_id, order.symbol, newQuantity, averageCost, fill.price, current?.sector ?? order.sector, current?.assetType ?? order.asset_type, fill.executedAt);
     sqlite.prepare('UPDATE strategy_cash SET balance=balance-?,updated_at=? WHERE strategy_id=?').run(cost, fill.executedAt, order.strategy_id);
@@ -163,6 +163,7 @@ export class VirtualPortfolioLedger {
   private applySell(sqlite: Database, order: OrderRow, fill: LedgerFill, fillId: string): number {
     const current = this.getPosition(order.strategy_id as string, order.symbol);
     if (!current || current.quantity + 0.000001 < fill.quantity) throw new Error('Strategy cannot sell shares owned by another strategy');
+    if(current.averageCost===null)throw new Error('Cost basis unavailable: realized P&L cannot be calculated for this sale.');
     let remaining = fill.quantity;
     let costBasis = 0;
     const lots = sqlite.prepare('SELECT id,remaining_quantity,entry_price,fees,opened_at FROM strategy_lots WHERE strategy_id=? AND symbol=? AND remaining_quantity>0.000001 ORDER BY opened_at,id').all(order.strategy_id, order.symbol) as Array<{ id: string; remaining_quantity: number; entry_price: number; fees: number; opened_at: string }>;
@@ -203,9 +204,9 @@ export class VirtualPortfolioLedger {
   private mapPosition(row: PositionRow): VirtualPosition {
     const marketValue = roundMoney(row.quantity * row.market_price);
     return {
-      strategyId: row.strategy_id, symbol: row.symbol, quantity: roundQuantity(row.quantity), averageCost: roundMoney(row.average_cost),
+      strategyId: row.strategy_id, symbol: row.symbol, quantity: roundQuantity(row.quantity), averageCost: row.average_cost===null?null:roundMoney(row.average_cost), basisStatus:row.average_cost===null?"UNAVAILABLE_EXTERNAL":"KNOWN",
       marketPrice: roundMoney(row.market_price), sector: row.sector, assetType: row.asset_type, marketValue,
-      unrealizedPnl: roundMoney((row.market_price - row.average_cost) * row.quantity), updatedAt: row.updated_at,
+      unrealizedPnl: row.average_cost===null?null:roundMoney((row.market_price - row.average_cost) * row.quantity), updatedAt: row.updated_at,
     };
   }
 }

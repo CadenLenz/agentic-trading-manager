@@ -61,6 +61,7 @@ export class CodexWorker {
 }
 export function workerServer(worker:CodexWorker,broker?:BrokerTransport){const server=Fastify({logger:false,bodyLimit:160000});
   if(broker){server.get('/broker/catalog',()=>broker.catalog());server.post('/broker/call',async r=>{const b=z.object({name:z.string().max(100),arguments:z.record(z.string(),z.unknown())}).strict().parse(r.body);return broker.call(b.name,b.arguments);});}
+  if(broker?.execute)server.post('/broker/execute',async r=>{const b=z.object({name:z.enum(['place_equity_order','place_option_order','cancel_equity_order','cancel_option_order']),arguments:z.record(z.string(),z.unknown())}).strict().parse(r.body);return broker.execute!(b.name,b.arguments);});
   server.get('/health',()=>worker.health());server.post('/jobs',async r=>worker.enqueue(r.body));server.get('/jobs/:id',async r=>worker.get(z.object({id:z.string().max(100)}).parse(r.params).id));server.post('/jobs/:id/cancel',async r=>worker.cancel(z.object({id:z.string().max(100)}).parse(r.params).id));return server;
 }
 export async function listenWorker(server:ReturnType<typeof workerServer>,socket:string){try{await unlink(socket);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}await server.listen({path:socket});await chmod(socket,0o660);}

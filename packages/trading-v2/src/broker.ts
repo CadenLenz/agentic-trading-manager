@@ -10,7 +10,7 @@ export class SimulationTradingBroker implements TradingBroker {
   constructor(private readonly db: AppDatabase, private readonly ledger: VirtualPortfolioLedger, private readonly market: MarketDataProvider) {}
   async account(): Promise<TradingAccount> {
     const owned=this.ledger.listPositions();
-    const positions=this.ledger.aggregatePositions().map(p=>({symbol:p.symbol,quantity:p.quantity,averageCost:owned.filter(v=>v.symbol===p.symbol).reduce((n,v)=>n+v.quantity*v.averageCost,0)/p.quantity,price:p.quantity?p.marketValue/p.quantity:0,assetClass:owned.find(v=>v.symbol===p.symbol)?.assetType==='ETF'?'ETF' as const:'EQUITY' as const}));
+    const positions=this.ledger.aggregatePositions().map(p=>({symbol:p.symbol,quantity:p.quantity,averageCost:owned.some(v=>v.symbol===p.symbol&&v.averageCost===null)?null:owned.filter(v=>v.symbol===p.symbol).reduce((n,v)=>n+v.quantity*v.averageCost!,0)/p.quantity,price:p.quantity?p.marketValue/p.quantity:0,assetClass:owned.find(v=>v.symbol===p.symbol)?.assetType==='ETF'?'ETF' as const:'EQUITY' as const}));
     const options=this.db.raw.prepare('SELECT option_id AS optionId,contracts,average_premium AS averagePremium,mark_price AS price,collateral FROM option_positions WHERE contracts<>0').all() as TradingAccount['options'];
     const cash=SLEEVES.reduce((n,s)=>n+this.ledger.getCash(s),0);
     const held=options.reduce((n,p)=>n+p.collateral,0);

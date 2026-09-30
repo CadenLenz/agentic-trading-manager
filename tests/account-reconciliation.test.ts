@@ -21,6 +21,20 @@ async function fixture(){
   return {account,broker,forbidden,proposals,service,request};
 }
 describe('Reviewed initial broker account import',()=>{
+  it('imports unavailable basis only with explicit acknowledgement, preserving null P&L and exact exposure',async()=>{
+    const {account,service,request,proposals}=await fixture();account.positions[0]!.averageCost=null;
+    await proposals.reconcile();expect(service.report().initialImport.available).toBe(true);
+    await expect(service.importOpeningBalance(request(),'operator')).rejects.toThrow('acknowledgement');
+    const acknowledgement='These holdings were imported from Robinhood and cost basis is currently unavailable.';
+    expect((await service.importOpeningBalance({...request(),basisAcknowledgement:acknowledgement},'operator')).clear).toBe(true);
+    expect(manager.ledger.getPosition('SAFE_LONG_TERM','TSLA')).toMatchObject({averageCost:null,basisStatus:'UNAVAILABLE_EXTERNAL',unrealizedPnl:null,marketValue:353});
+    expect(manager.allocation.state('SAFE_LONG_TERM')).toMatchObject({currentEquity:553,unrealizedPnL:null,drawdown:0});
+    manager.analytics.snapshot('UNKNOWN_BASIS_OPENING');expect(service.report().warnings).toContain('Historical cost basis unavailable: TSLA');
+    expect(()=>manager.risk.defaultContext()).toThrow('basis-dependent');
+    manager.allocation.transferPosition('SAFE_LONG_TERM','OPTIONS','TSLA',1,'Reviewed collateral ownership transfer','operator');
+    expect(manager.ledger.getPosition('OPTIONS','TSLA')?.averageCost).toBeNull();
+    expect((await proposals.reconcile()).clear).toBe(true);
+  });
   it('shows incomplete broker holdings and cash with a specific basis blocker and cannot clear or import them',async()=>{
     const {service,proposals,broker,request}=await fixture();const input=request();
     Object.assign(broker,{account:async()=>{throw new BrokerBasisUnavailable({accountId:'fixture-account',cash:500.53,buyingPower:500.53,netAccountValue:940.53,asOf:nowIso(),positions:[{symbol:'TSLA',quantity:1,averageCost:null}]},['TSLA']);}});

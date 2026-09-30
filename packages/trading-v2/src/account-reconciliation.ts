@@ -9,6 +9,7 @@ import type {IncompleteBrokerObservation} from './worker-broker.js';
 type Account=Awaited<ReturnType<TradingBroker['account']>>;
 export const initialAccountImportSchema=z.object({
   token:z.string().length(64),confirmation:z.literal('IMPORT VERIFIED ACCOUNT'),review:z.string().min(20).max(2000),
+  basisAcknowledgement:z.literal("These holdings were imported from Robinhood and cost basis is currently unavailable.").optional(),
   assignments:z.array(z.object({symbol:z.string(),strategy:sleeveSchema}).strict()),
   cash:z.object({SAFE_LONG_TERM:z.number().finite().nonnegative(),AGGRESSIVE_STOCKS:z.number().finite().nonnegative(),OPTIONS:z.number().finite().nonnegative()}).strict(),
 }).strict();
@@ -23,9 +24,9 @@ export class AccountReconciliationService {
     if(!a||!a.agentic||!a.complete||!a.healthy||a.accountId!==process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID)throw new Error('A complete, healthy snapshot of the configured account is required.');
     if(!Number.isFinite(Date.parse(a.asOf))||Date.now()-Date.parse(a.asOf)>60000||Date.now()-Date.parse(a.asOf)<-5000)throw new Error('Sync the account to obtain a fresh broker snapshot.');
     if(a.options.length||a.orders.length||a.fills.length)throw new Error('Options or broker order/fill activity require individual verified-event review.');
-    if(this.db.getSetting<string[]>('reconciliation_v2',[]).some(x=>!x.startsWith('Equity ownership mismatch: ')&&x!=='Cash/buying-power mismatch'))throw new Error('Resolve broker verification or execution discrepancies before importing an opening balance.');
+    if(this.db.getSetting<string[]>('reconciliation_v2',[]).some(x=>!x.startsWith('Equity ownership mismatch: ')&&x!=='Cash/buying-power mismatch'&&x!=='Unavailable basis acknowledgement required'))throw new Error('Resolve broker verification or execution discrepancies before importing an opening balance.');
     if(!Number.isFinite(a.cash)||a.cash<0||!Number.isFinite(a.buyingPower)||a.buyingPower<0||!Number.isFinite(a.netAccountValue)||a.netAccountValue<0)throw new Error('Broker balances are invalid.');
-    if(new Set(a.positions.map(p=>p.symbol)).size!==a.positions.length||a.positions.some(p=>!Number.isFinite(p.quantity)||p.quantity<=0||!Number.isFinite(p.averageCost)||p.averageCost<0||!Number.isFinite(p.price)||p.price<=0))throw new Error('Broker holdings need individual review.');
+    if(new Set(a.positions.map(p=>p.symbol)).size!==a.positions.length||a.positions.some(p=>!Number.isFinite(p.quantity)||p.quantity<=0||p.averageCost!==null&&(!Number.isFinite(p.averageCost)||p.averageCost<0)||!Number.isFinite(p.price)||p.price<=0))throw new Error('Broker holdings need individual review.');
     const queries=[
       'SELECT 1 FROM strategy_positions LIMIT 1','SELECT 1 FROM strategy_lots LIMIT 1','SELECT 1 FROM fills LIMIT 1',
       'SELECT 1 FROM option_positions LIMIT 1','SELECT 1 FROM position_assignments LIMIT 1',
@@ -45,14 +46,17 @@ export class AccountReconciliationService {
     const internalCash=roundMoney(SLEEVES.reduce((n,s)=>n+this.proposals.ledger.getCash(s),0));
     let importBlocked:string|null=null;try{this.guard(a);}catch(e){importBlocked=e instanceof Error?e.message:String(e);}
     return {clear:this.db.getSetting('reconciliation_clear',false),lastRunAt:this.db.getSetting<string|null>('last_reconciliation_at',null),mismatches:this.db.getSetting<string[]>('reconciliation_v2',[]),
+      warnings:this.db.getSetting<string[]>('reconciliation_warnings_v2',[]),
       positions:[...new Set([...internal.map(p=>p.symbol),...(observed?.positions??[]).map(p=>p.symbol)])].map(symbol=>({symbol,internal:internal.find(p=>p.symbol===symbol)?.quantity??0,broker:observed?.positions.find(p=>p.symbol===symbol)?.quantity??0,averageCost:observed?.positions.find(p=>p.symbol===symbol)?.averageCost??null})),
       cash:{internal:internalCash,broker:observed?.cash??null,buyingPower:observed?.buyingPower??null},account:observed,snapshotComplete:!!a,
       initialImport:{available:!importBlocked,reason:importBlocked,token:a?this.token(a):null}};
   }
   async importOpeningBalance(input:unknown,actor:string){
     const b=initialAccountImportSchema.parse(input);
+    if(this.db.getMode()!=='READ_ONLY'||!this.db.getSetting('global_pause',false))throw new Error('Pause the app in Read only before importing an opening balance.');
     // Re-read broker truth; a stale page cannot import changed quantities, basis, or cash.
     const {account:a}=await this.proposals.reconcile();this.guard(a);
+    if(a.positions.some(p=>p.averageCost===null)&&!b.basisAcknowledgement)throw new Error("Explicit unavailable cost-basis acknowledgement required.");
     if(this.token(a)!==b.token)throw new Error('Account balances or holdings changed. Sync and review the updated opening balance.');
     if(b.assignments.length!==a.positions.length||new Set(b.assignments.map(p=>p.symbol)).size!==b.assignments.length||b.assignments.some(p=>!a.positions.some(x=>x.symbol===p.symbol)))throw new Error('Choose exactly one strategy for every broker holding.');
     if(SLEEVES.some(s=>Math.abs(b.cash[s]*100-Math.round(b.cash[s]*100))>0.000001)||Math.abs(SLEEVES.reduce((n,s)=>n+Math.round(b.cash[s]*100),0)-Math.round(a.cash*100))>0)throw new Error('Strategy cash must total verified broker cash exactly, in cents.');
@@ -73,9 +77,10 @@ export class AccountReconciliationService {
       // The opening account value is capital, not a loss from the fictitious setup balance.
       for(const s of SLEEVES){const equity=roundMoney(b.cash[s]+a.positions.filter(p=>b.assignments.find(x=>x.symbol===p.symbol)?.strategy===s).reduce((n,p)=>n+p.price*p.quantity,0));
         this.db.raw.prepare('UPDATE strategy_capital SET starting_capital=?,weekly_starting_capital=?,high_water_mark=?,week_key=? WHERE strategy_id=?').run(equity,equity,equity,weekKey(),s);}
+      this.db.setSetting('v2_migration_review_required',false);
       this.db.setSetting('initial_account_import_v2',{reference,accountId:a.accountId,at,actor});
       this.db.setSetting('reconciliation_clear',false);this.db.setSetting('global_pause',true);
-      this.db.audit(actor,'INITIAL_ACCOUNT_IMPORT','account',a.accountId,{before,assignments:b.assignments,cash:b.cash,review:b.review,reference,brokerTradingPerformed:false});
+      this.db.audit(actor,'INITIAL_ACCOUNT_IMPORT','account',a.accountId,{before,assignments:b.assignments,cash:b.cash,review:b.review,reference,basisAcknowledgement:b.basisAcknowledgement??null,unavailableBasis:a.positions.filter(p=>p.averageCost===null).map(p=>p.symbol),brokerTradingPerformed:false});
     })();
     return this.proposals.reconcile();
   }

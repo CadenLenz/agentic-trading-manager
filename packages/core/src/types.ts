@@ -135,12 +135,13 @@ export interface VirtualPosition {
   strategyId: string;
   symbol: string;
   quantity: number;
-  averageCost: number;
+  averageCost: number|null;
+  basisStatus: "KNOWN"|"UNAVAILABLE_EXTERNAL";
   marketPrice: number;
   sector: string;
   assetType: AssetType;
   marketValue: number;
-  unrealizedPnl: number;
+  unrealizedPnl: number|null;
   updatedAt: string;
 }
 

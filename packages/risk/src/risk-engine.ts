@@ -102,7 +102,7 @@ export class RiskEngine {
     const cash = this.database.listStrategies().reduce((sum, strategy) => sum + strategy.cash, 0);
     const exposure = positions.reduce((sum, position) => sum + position.marketValue, 0);
     const realized = this.ledger.getRealizedPnl();
-    const unrealized = positions.reduce((sum, position) => sum + position.unrealizedPnl, 0);
+    const unrealized = positions.reduce((sum, position) => sum + this.requirePnl(position), 0);
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const week = new Date(today); week.setDate(today.getDate() - ((today.getDay() + 6) % 7));
     const sectors: Record<string, number> = {};
@@ -139,10 +139,12 @@ export class RiskEngine {
     if (strategySectorExposure + notional > strategySectorLimit + 0.01) violations.push(this.violation('STRATEGY_SECTOR_CONCENTRATION', 'Order would exceed strategy sector concentration.', 'CRITICAL', 'STRATEGY', roundMoney(strategySectorExposure + notional), roundMoney(strategySectorLimit)));
   }
 
+  private requirePnl(position:VirtualPosition):number {if(position.unrealizedPnl===null)throw new Error('Cost basis unavailable for basis-dependent P&L risk calculation: '+position.symbol);return position.unrealizedPnl;}
+
   private strategyPnl(strategyId: string, includeUnrealized: boolean): number {
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const realized = this.ledger.getRealizedPnl(strategyId, today.toISOString());
-    const unrealized = includeUnrealized ? this.ledger.listPositions(strategyId).reduce((sum, position) => sum + position.unrealizedPnl, 0) : 0;
+    const unrealized = includeUnrealized ? this.ledger.listPositions(strategyId).reduce((sum, position) => sum + this.requirePnl(position), 0) : 0;
     return roundMoney(realized + unrealized);
   }
 

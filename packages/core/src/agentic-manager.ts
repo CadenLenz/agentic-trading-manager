@@ -110,8 +110,8 @@ export class AgenticManager {
     this.proposals.onQuote=(p,q)=>{if(p.option)this.analytics.recordOption(p.option.optionId,q);};
     this.proposals.onEvent=(kind,detail)=>{try{this.events.publish({type:kind,severity:kind==='RECONCILIATION_FAILURE'?'CRITICAL':'INFO',source:'V2',payload:detail});
       if(kind==='PROPOSAL_TRANSITION'){const p=this.proposals.get(String(detail.id)),state=String(detail.to);if(['FILLED','PARTIALLY_FILLED'].includes(state))this.analytics.snapshot('FILL');
-        const event=state==='PARTIALLY_FILLED'?'PARTIAL_FILL':state==='REJECTED'?'REJECTED':state==='RECONCILIATION_REQUIRED'?'RECONCILIATION_FAILURE':state==='FILLED'?(p.option?'OPTION_'+(p.positionEffect==='OPEN'?'OPENED':'CLOSED'):p.strategy==='AGGRESSIVE_STOCKS'?'AGGRESSIVE_'+(p.positionEffect==='OPEN'?'OPENED':'CLOSED'):'SAFE_TRADE'):null;
-        if(event)this.notifications.emit(p.id+':'+state+':'+String(this.database.raw.prepare('SELECT COUNT(*) AS n FROM fills').get()&&(this.database.raw.prepare('SELECT COUNT(*) AS n FROM fills').get() as {n:number}).n),event,state==='RECONCILIATION_REQUIRED'?'CRITICAL':'INFO',{summary:p.symbol+' '+state,proposalId:p.id});
+        const event=state==='PARTIALLY_FILLED'?'PARTIAL_FILL':state==='REJECTED'?'REJECTED':['RECONCILIATION_REQUIRED','UNKNOWN_OUTCOME'].includes(state)?'RECONCILIATION_FAILURE':state==='FILLED'?(p.option?'OPTION_'+(p.positionEffect==='OPEN'?'OPENED':'CLOSED'):p.strategy==='AGGRESSIVE_STOCKS'?'AGGRESSIVE_'+(p.positionEffect==='OPEN'?'OPENED':'CLOSED'):'SAFE_TRADE'):null;
+        if(event)this.notifications.emit(p.id+':'+state+':'+String(this.database.raw.prepare('SELECT COUNT(*) AS n FROM fills').get()&&(this.database.raw.prepare('SELECT COUNT(*) AS n FROM fills').get() as {n:number}).n),event,['RECONCILIATION_REQUIRED','UNKNOWN_OUTCOME'].includes(state)?'CRITICAL':'INFO',{summary:p.symbol+' '+state,proposalId:p.id});
       }else{if(kind==='RECONCILED')this.analytics.snapshot('RECONCILIATION');this.notifications.emit(kind+':'+nowIso(),kind,kind==='RECONCILIATION_FAILURE'?'CRITICAL':'INFO',{summary:kind,...detail});}
     }catch{this.database.audit('OBSERVABILITY','EVENT_SIDE_EFFECT_FAILED','system',null,{kind});}};
     this.codexTasks=new CodexTaskService(this.database,this.proposals);
@@ -147,7 +147,7 @@ export class AgenticManager {
     this.database.setSetting('codex_reasoning_enabled',false);
     this.directives.expireDue();
     const interrupted=this.database.raw.prepare("SELECT proposal_id FROM executions_v2 WHERE status='PENDING' AND broker_order_id IS NULL").all() as Array<{proposal_id:string}>;
-    for(const e of interrupted){if(this.proposals.get(e.proposal_id).state==='EXECUTION_SENT')this.proposals.transition(e.proposal_id,'RECONCILIATION_REQUIRED','STARTUP',{reason:'Interrupted send; never automatically replay placement'});this.database.setSetting('global_pause',true);this.database.setSetting('reconciliation_clear',false);}
+    for(const e of interrupted){this.database.raw.prepare("UPDATE executions_v2 SET status='UNKNOWN_OUTCOME' WHERE proposal_id=?").run(e.proposal_id);if(this.proposals.get(e.proposal_id).state==='EXECUTION_SENT')this.proposals.transition(e.proposal_id,'UNKNOWN_OUTCOME','STARTUP',{reason:'Interrupted send; never automatically replay placement'});this.database.setSetting('global_pause',true);this.database.setSetting('reconciliation_clear',false);}
     const unknownOrders = this.database.raw.prepare("SELECT COUNT(*) AS count FROM orders WHERE status IN ('PENDING','SUBMITTED','PARTIALLY_FILLED','UNKNOWN')").get() as { count: number };
     if (unknownOrders.count > 0 && this.database.getMode() !== 'SIMULATION') this.database.setSetting('reconciliation_clear', false);
     {

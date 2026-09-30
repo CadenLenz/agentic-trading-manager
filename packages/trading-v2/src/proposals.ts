@@ -4,7 +4,6 @@ import type { VirtualPortfolioLedger } from '../../ledger/src/virtual-ledger.js'
 import { makeId, nowIso, roundMoney } from '../../core/src/utils.js';
 import { StrategyAllocationManager } from './capital.js';
 import {RiskConfigurationService} from './configuration.js';
-import {PREPRODUCTION_LIVE_LOCK} from './readiness.js';
 import {pacificPeriodStart} from './periods.js';
 import {BrokerBasisUnavailable} from './worker-broker.js';
 import { DEFAULT_ACCOUNT_POLICY, accountPolicySchema, proposalSchema, researchSchema, RESEARCH_REQUIRED, SLEEVES, type Proposal, type ProposalState, type TradingBroker, type ExecutableOrder, type BrokerFill, type AgentMode } from './model.js';
@@ -14,8 +13,9 @@ export const TRANSITIONS:Partial<Record<ProposalState,ProposalState[]>>={
   DRAFT:['RESEARCHED','CANCELLED'], RESEARCHED:['SUBMITTED_TO_RISK','DRAFT','CANCELLED'],
   SUBMITTED_TO_RISK:['RISK_REJECTED','RISK_APPROVED','FAILED'],RISK_REJECTED:['DRAFT','SUBMITTED_TO_RISK','CANCELLED'],
   RISK_APPROVED:['BROKER_PREVIEWED','FAILED','CANCELLED'],BROKER_PREVIEWED:['READY_TO_EXECUTE','RISK_REJECTED','CANCELLED'],
-  READY_TO_EXECUTE:['EXECUTION_SENT','RISK_REJECTED','DRAFT','CANCELLED'],EXECUTION_SENT:['BROKER_ACCEPTED','REJECTED','RECONCILIATION_REQUIRED'],
-  BROKER_ACCEPTED:['PARTIALLY_FILLED','FILLED','CANCELLED','RECONCILIATION_REQUIRED'],PARTIALLY_FILLED:['PARTIALLY_FILLED','FILLED','CANCELLED','RECONCILIATION_REQUIRED'],
+  READY_TO_EXECUTE:['EXECUTION_SENT','RISK_REJECTED','DRAFT','CANCELLED'],EXECUTION_SENT:['BROKER_ACCEPTED','REJECTED','UNKNOWN_OUTCOME','RECONCILIATION_REQUIRED'],
+  BROKER_ACCEPTED:['PARTIALLY_FILLED','FILLED','CANCELLED','UNKNOWN_OUTCOME','RECONCILIATION_REQUIRED'],PARTIALLY_FILLED:['PARTIALLY_FILLED','FILLED','CANCELLED','UNKNOWN_OUTCOME','RECONCILIATION_REQUIRED'],
+  UNKNOWN_OUTCOME:['BROKER_ACCEPTED','PARTIALLY_FILLED','FILLED','CANCELLED','REJECTED'],
   FILLED:['CLOSED'],FAILED:['DRAFT','CANCELLED'],RECONCILIATION_REQUIRED:['BROKER_ACCEPTED','PARTIALLY_FILLED','FILLED','CANCELLED','REJECTED'],
 };
 const fingerprint=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -109,9 +109,9 @@ export class ProposalService {
     check('ACCOUNT_SCOPE',this.db.getMode()==='SIMULATION'||account.accountId===process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID);
     check('FRESH_ACCOUNT',now-Date.parse(account.asOf)>=-5000&&now-Date.parse(account.asOf)<=policy.maxQuoteAgeSeconds*1000);
     check('NO_BORROWING',[account.cash,account.buyingPower,account.netAccountValue].every(Number.isFinite)&&account.cash>=0&&account.buyingPower>=0&&account.netAccountValue>0);
-    check('GLOBAL_PAUSE',p.positionEffect==='CLOSE'||!this.db.getSetting('global_pause',false));
-    check('MAINTENANCE_STOP',!this.db.getSetting('maintenance_mode',false)&&(p.positionEffect==='CLOSE'||!this.db.getSetting('stopped',false)));
-    check('SLEEVE_ENABLED',p.positionEffect==='CLOSE'||!!this.db.getStrategy(p.strategy)?.enabled);
+    check('GLOBAL_PAUSE',!this.db.getSetting('global_pause',false));
+    check('MAINTENANCE_STOP',!this.db.getSetting('maintenance_mode',false)&&!this.db.getSetting('stopped',false));
+    check('SLEEVE_ENABLED',!!this.db.getStrategy(p.strategy)?.enabled);
     check('RECONCILIATION',this.db.getSetting('reconciliation_clear',false)&&!this.db.getSetting('v2_migration_review_required',false));
     check('SLEEVE_KILL',p.positionEffect==='CLOSE'||!sleeve.killed);
     check('NORMAL_DRAWDOWN',p.positionEffect==='CLOSE'||sleeve.drawdown<Math.min(sleevePolicy.normalDrawdownPercent,this.db.getStrategy(p.strategy)!.config.maxDrawdownPercent));
@@ -125,18 +125,22 @@ export class ProposalService {
     check('RESEARCH_REAL',this.db.getMode()==='SIMULATION'||(research.success&&!research.data.simulated));
     const session=this.db.raw.prepare('SELECT * FROM market_sessions WHERE opens_at<=? AND closes_at>?').get(nowIso(),nowIso()) as {verified_at:string}|undefined;
     check('MARKET_SESSION',this.db.getMode()==='SIMULATION'?this.db.getSetting('simulation_market_open',true):!!session&&now-Date.parse(session.verified_at)<7*86400000);
-    check('SUPPORTED_ORDER',(p.orderType==='LIMIT'||this.db.getMode()==='SIMULATION'&&!p.option&&p.orderType==='MARKET')&&p.marketHours==='REGULAR'&&p.dollarAmount===null,'LIVE requires regular-hours LIMIT; synthetic equity MARKET is supported, STOP requires a separately validated closing proposal');
+    check('SUPPORTED_ORDER',(p.orderType==='LIMIT'&&!p.option&&Number.isInteger(p.quantity)||p.orderType==='LIMIT'&&!!p.option||!p.option&&p.orderType==='MARKET')&&p.marketHours==='REGULAR'&&p.dollarAmount===null,'Official regular-hours equity market/whole-share limit and single-leg option limit orders only');
     check('SLEEVE_ASSET',p.strategy==='OPTIONS'?p.assetClass==='OPTION':p.assetClass!=='OPTION');
     check('HOLDING_PLAN',p.positionEffect==='CLOSE'||p.strategy==='SAFE_LONG_TERM'?(p.positionEffect==='CLOSE'||p.holdingTradingDays===null||p.holdingTradingDays>=90):(p.holdingTradingDays!==null&&p.holdingTradingDays<=sleevePolicy.maxHoldingTradingDays));
     const directives=this.db.raw.prepare("SELECT type,value_json FROM directives WHERE active=1 AND (strategy_id IS NULL OR strategy_id=?) AND (symbol IS NULL OR symbol IN (?,?)) AND (expires_at IS NULL OR expires_at>?)").all(p.strategy,p.symbol,p.underlying,nowIso()) as Array<{type:string;value_json:string}>;
     check('FORBIDDEN_SYMBOL',!directives.some(d=>d.type==='FORBIDDEN_SYMBOL'));
     check('RESEARCH_ONLY',!directives.some(d=>d.type==='RESEARCH_ONLY'));
-    check('PAUSE_DIRECTIVE',p.positionEffect==='CLOSE'||!directives.some(d=>d.type==='STRATEGY_PAUSE'));
+    check('PAUSE_DIRECTIVE',!directives.some(d=>d.type==='STRATEGY_PAUSE'));
     check('LIQUIDITY',q.volume>=sleevePolicy.minVolume&&(q.ask-q.bid)/q.ask*100<=sleevePolicy.maxSpreadPercent);
     check('EQUITY_PRICE',p.option!==null||q.price>=sleevePolicy.minEquityPrice);
     const notional=p.quantity*(p.limitPrice??q.ask)*(p.option?100:1);
-    let cashRequired=p.side==='BUY'?notional:0,sharesRequired=0,maxLoss=p.side==='BUY'?notional:0;
+    const priorPreview=JSON.parse(this.row(id).preview_json??'null') as {raw?:{fees?:{total_fee?:string}}}|null;
+    const previewFee=p.option&&priorPreview?.raw?.fees?.total_fee!==undefined?Number(priorPreview.raw.fees.total_fee):0;
+    check('VERIFIED_PREVIEW_FEES',Number.isFinite(previewFee)&&previewFee>=0);
+    let cashRequired=p.side==='BUY'?notional+previewFee:previewFee,sharesRequired=0,maxLoss=p.side==='BUY'?notional+previewFee:previewFee;
     const position=this.ledger.getPosition(p.strategy,p.symbol);
+    check('COST_BASIS_FOR_SALE',!!p.option||p.side!=='SELL'||position?.averageCost!==null,'A sale with unavailable historical basis cannot book realized P&L; basis-dependent calculations are unavailable.');
     if(!p.option) {
       check('LONG_ONLY_EFFECT',p.side==='BUY'?p.positionEffect==='OPEN':p.positionEffect==='CLOSE');
       const reserved=this.db.raw.prepare("SELECT COALESCE(SUM(shares),0) AS shares FROM capital_reservations WHERE strategy_id=? AND underlying=? AND status='ACTIVE'").get(p.strategy,p.symbol) as {shares:number};
@@ -154,9 +158,9 @@ export class ProposalService {
       const closing=this.db.raw.prepare("SELECT COALESCE(SUM(o.quantity-o.cumulative_filled_quantity),0) AS quantity FROM executions_v2 e JOIN orders o ON o.id=e.order_id WHERE e.status='PENDING' AND json_extract(e.order_json,'$.option.optionId')=? AND json_extract(e.order_json,'$.positionEffect')='CLOSE'").get(o.optionId) as {quantity:number};
       check('OWNED_OPTION',p.positionEffect==='OPEN'||!!held&&(long?held.contracts>0:held.contracts<0)&&Math.abs(held.contracts)-closing.quantity>=p.quantity);
       check('NO_OPPOSITE_CONTRACT',p.positionEffect==='CLOSE'||!held||(long?held.contracts>=0:held.contracts<=0));
-      if(p.positionEffect==='OPEN'&&o.strategy==='CASH_SECURED_PUT'){cashRequired=o.strike*100*p.quantity;maxLoss=cashRequired;}
+      if(p.positionEffect==='OPEN'&&o.strategy==='CASH_SECURED_PUT'){cashRequired=o.strike*100*p.quantity+previewFee;maxLoss=cashRequired;}
       if(p.positionEffect==='OPEN'&&o.strategy==='COVERED_CALL'){
-        sharesRequired=100*p.quantity;maxLoss=sharesRequired*(this.ledger.getPosition('OPTIONS',p.underlying!)?.marketPrice??0);
+        sharesRequired=100*p.quantity;maxLoss=previewFee+sharesRequired*(this.ledger.getPosition('OPTIONS',p.underlying!)?.marketPrice??0);
         const covered=sleeve.options.reduce((n,v)=>n+(JSON.parse(v.instrument_json).underlying===p.underlying?v.reserved_shares:0),0);
         const pending=this.db.raw.prepare("SELECT COALESCE(SUM(shares),0) AS shares FROM capital_reservations WHERE strategy_id='OPTIONS' AND underlying=? AND status='ACTIVE'").get(p.underlying) as {shares:number};
         check('SAME_SLEEVE_COVERAGE',(this.ledger.getPosition('OPTIONS',p.underlying!)?.quantity??0)-covered-pending.shares>=sharesRequired);
@@ -238,6 +242,7 @@ export class ProposalService {
   async review(id:string,actor:string){
     if(this.busy)throw new Error('Trading workflow busy');this.busy=true;
     try{
+      if(this.db.getMode()!=='SIMULATION')await this.reconcile();
       const p=this.get(id);if(!['RESEARCHED','RISK_REJECTED'].includes(p.state))throw new Error('Research first; review requires RESEARCHED or RISK_REJECTED');
       this.transition(id,'SUBMITTED_TO_RISK',actor);
       const r=await this.risk(id);this.transition(id,r.approved?'RISK_APPROVED':'RISK_REJECTED','RISK_ENGINE',{checks:r.checks});
@@ -245,7 +250,8 @@ export class ProposalService {
       const preview=await this.broker().preview(r.facts.order);
       this.db.raw.prepare('UPDATE proposals SET preview_json=?,preview_hash=? WHERE id=?').run(JSON.stringify(preview),r.facts.orderHash,id);
       this.transition(id,'BROKER_PREVIEWED','BROKER_ADAPTER',{preview,hash:r.facts.orderHash});
-      const valid=preview.approved&&Number.isFinite(preview.estimatedCost)&&preview.estimatedCost>=0&&preview.estimatedCost<=r.facts.notional+0.01&&Number.isFinite(preview.collateralRequired)&&preview.collateralRequired>=0&&preview.collateralRequired<=r.facts.cashRequired&&Date.now()-Date.parse(preview.asOf)>=-5000&&Date.now()-Date.parse(preview.asOf)<=60000;
+      const second=p.option?await this.risk(id):r;
+      const valid=second.approved&&preview.approved&&Number.isFinite(preview.estimatedCost)&&preview.estimatedCost>=0&&preview.estimatedCost<=second.facts.notional+(second.facts.cashRequired-(p.side==='BUY'?second.facts.notional:0))+.01&&Number.isFinite(preview.collateralRequired)&&preview.collateralRequired>=0&&preview.collateralRequired<=second.facts.cashRequired&&Date.now()-Date.parse(preview.asOf)>=-5000&&Date.now()-Date.parse(preview.asOf)<=60000;
       this.transition(id,valid?'READY_TO_EXECUTE':'RISK_REJECTED','RISK_ENGINE',{previewValid:valid});return this.detail(id);
     }catch(e){if(['SUBMITTED_TO_RISK','RISK_APPROVED'].includes(this.get(id).state))this.transition(id,'FAILED','WORKFLOW',{reason:e instanceof Error?e.message:'Error'});throw e;}finally{this.busy=false;}
   }
@@ -256,14 +262,16 @@ export class ProposalService {
     try{
       const p=this.get(id),row=this.row(id);if(p.state!=='READY_TO_EXECUTE')throw new Error('Proposal is not ready');
       if(this.db.getMode()==='READ_ONLY')throw new Error('Read Only blocks execution');
-      if(this.db.getMode()==='LIVE'&&PREPRODUCTION_LIVE_LOCK)throw new Error('DO NOT ENABLE LIVE YET: pre-production execution lock');
-      if(this.db.getMode()==='LIVE'&&(!this.db.getSetting('v2_live_activation',false)||!this.db.getSetting('live_db_confirmation',false)||process.env.ALLOW_LIVE_TRADING!=='true'||process.env.TRADING_MODE!=='LIVE'))throw new Error('Master LIVE activation is disabled');
+      if(this.db.getMode()==='LIVE'&&agentMode)throw new Error('Manual LIVE submission must come from the operator dashboard, not an agent');
+      if(this.db.getMode()==='LIVE'&&(!this.db.getSetting('v2_live_activation',false)||!this.db.getSetting('live_db_confirmation',false)))throw new Error('Master LIVE activation is disabled');
       const policy=this.allocation.policy(p.strategy);
-      const autonomous=agentMode==='AUTONOMOUS'&&policy.executionPolicy==='AUTONOMOUS_RISK_APPROVED'&&!this.db.getSetting('global_pause',false)&&!this.allocation.state(p.strategy).killed&&!!this.db.getStrategy(p.strategy)?.enabled;
+      const autonomous=this.db.getMode()==='SIMULATION'&&agentMode==='AUTONOMOUS'&&policy.executionPolicy==='AUTONOMOUS_RISK_APPROVED'&&!this.db.getSetting('global_pause',false)&&!this.allocation.state(p.strategy).killed&&!!this.db.getStrategy(p.strategy)?.enabled;
       const approval=JSON.parse(row.approval_json??'null') as {version:number;hash:string;expiresAt:string}|null;
       if(!autonomous&&(!approval||approval.version!==p.version||approval.hash!==row.preview_hash||Date.parse(approval.expiresAt)<=Date.now()))throw new Error('Explicit approval for this version/preview required');
       if(agentMode==='ADVISOR')throw new Error('ADVISOR cannot execute');
+      if(this.db.getMode()!=='SIMULATION')await this.reconcile();
       const r=await this.risk(id);
+      if(r.approved&&(this.db.getSetting('stopped',false)||this.db.getSetting('global_pause',false)||this.db.getSetting('maintenance_mode',false)))throw new Error('STOP or pause blocks all execution');
       const preview=JSON.parse(row.preview_json??'null') as {asOf:string}|null;
       if(!r.approved||r.facts.orderHash!==row.preview_hash||!preview||Date.now()-Date.parse(preview.asOf)>60000){this.transition(id,'RISK_REJECTED','RISK_ENGINE',{secondRisk:r.checks,previewStale:!preview||Date.now()-Date.parse(preview.asOf)>60000});return this.detail(id);}
       let orderId='';
@@ -283,21 +291,22 @@ export class ProposalService {
         for(const fill of result.fills)this.applyFill(id,fill);
         return this.detail(id);
       }catch(e){
-        this.ledger.updateOrder(orderId,'UNKNOWN');this.transition(id,'RECONCILIATION_REQUIRED','EXECUTION_ENGINE',{reason:e instanceof Error?e.message:'Unknown outcome'});
-        this.db.setSetting('reconciliation_clear',false);this.db.setSetting('global_pause',true);throw e;
+        this.ledger.updateOrder(orderId,'UNKNOWN');this.db.raw.prepare("UPDATE executions_v2 SET status='UNKNOWN_OUTCOME' WHERE proposal_id=?").run(id);this.transition(id,'UNKNOWN_OUTCOME','EXECUTION_ENGINE',{reason:e instanceof Error?e.message:'Unknown outcome'});
+        this.db.setSetting('reconciliation_clear',false);this.db.setSetting('global_pause',true);this.db.setSetting('v2_live_activation',false);this.db.setSetting('live_db_confirmation',false);if(this.db.getMode()==='LIVE')this.db.setSetting('operating_mode','READ_ONLY');throw e;
       }
     }finally{this.busy=false;}
   }
   private release(id:string){this.db.raw.prepare("UPDATE capital_reservations SET status='RELEASED' WHERE proposal_id=?").run(id);this.db.raw.prepare("UPDATE executions_v2 SET status='TERMINAL',updated_at=? WHERE proposal_id=?").run(nowIso(),id);}
   applyFill(id:string,fill:BrokerFill){
     const p=this.get(id),r=this.row(id);if(!r.order_id)throw new Error('Execution attribution missing');
+    if(fill.fees===null)throw new Error('Broker fill fees unavailable: review the actual broker receipt before booking this fill');
     if(!Number.isFinite(fill.price)||fill.price<=0||!Number.isFinite(fill.quantity)||fill.quantity<=0||!Number.isFinite(fill.fees)||fill.fees<0)throw new Error('Invalid fill');
     const execution=this.db.raw.prepare('SELECT broker_order_id FROM executions_v2 WHERE proposal_id=?').get(id) as {broker_order_id:string};
     if(fill.brokerOrderId!==execution.broker_order_id)throw new Error('Fill broker attribution mismatch');
     this.db.raw.transaction(()=>{
       if(this.db.raw.prepare('SELECT id FROM fills WHERE broker_fill_id=?').get(fill.id))return;
       if(p.option)this.optionFill(p,r.order_id!,fill);
-      else this.ledger.applyFill({brokerFillId:fill.id,orderId:r.order_id!,quantity:fill.quantity,price:fill.price,fees:fill.fees,executedAt:fill.executedAt});
+      else this.ledger.applyFill({brokerFillId:fill.id,orderId:r.order_id!,quantity:fill.quantity,price:fill.price,fees:fill.fees!,executedAt:fill.executedAt});
       const order=this.db.raw.prepare('SELECT cumulative_filled_quantity FROM orders WHERE id=?').get(r.order_id) as {cumulative_filled_quantity:number};
       const remaining=p.quantity-order.cumulative_filled_quantity;
       this.db.raw.prepare("UPDATE capital_reservations SET cash_amount=cash_amount*?,shares=shares*? WHERE proposal_id=? AND status='ACTIVE'").run(Math.max(0,(remaining)/(remaining+fill.quantity)),Math.max(0,remaining/(remaining+fill.quantity)),id);
@@ -307,6 +316,7 @@ export class ProposalService {
     })();
   }
   private optionFill(p:Proposal,orderId:string,f:BrokerFill){
+    if(f.fees===null)throw new Error("Verified option fill fees required");
     const o=p.option!;if(!Number.isInteger(f.quantity))throw new Error('Option fill quantity must be contracts');
     const order=this.db.raw.prepare('SELECT cumulative_filled_quantity FROM orders WHERE id=?').get(orderId) as {cumulative_filled_quantity:number};
     if(order.cumulative_filled_quantity+f.quantity>p.quantity)throw new Error('Overfill');
@@ -340,13 +350,22 @@ export class ProposalService {
     this.db.audit('LEDGER','OPTION_FILL_APPLIED','order',orderId,{f,contracts,collateral,shares});
     this.db.raw.prepare('INSERT INTO virtual_transactions(id,idempotency_key,strategy_id,type,amount,symbol,quantity,reference_id,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(makeId('vtx'),'option-fill:'+f.id,p.strategy,'OPTION_'+p.positionEffect,roundMoney(cashDelta),p.symbol,f.quantity,fillId,JSON.stringify({optionId:o.optionId,contracts,collateral,reservedShares:shares}),f.executedAt);
   }
+  async linkUnknown(id:string,brokerOrderId:string,review:string,actor:string){
+    if(this.busy||this.db.getMode()!=='READ_ONLY'||!this.db.getSetting('global_pause',false))throw new Error('Pause in Read only before reviewing an unknown outcome');
+    const p=this.get(id),e=this.db.raw.prepare('SELECT order_id,order_json,broker_order_id,created_at FROM executions_v2 WHERE proposal_id=?').get(id) as {order_id:string;order_json:string;broker_order_id:string|null;created_at:string}|undefined;
+    if(p.state!=='UNKNOWN_OUTCOME'||!e||e.broker_order_id)throw new Error('Unlinked unknown execution required');
+    const broker=this.broker();if(!broker.lookup)throw new Error('Scoped broker order lookup unavailable');
+    const result=await broker.lookup(JSON.parse(e.order_json),brokerOrderId);
+    if(result.order.status==='UNKNOWN'||this.db.raw.prepare('SELECT id FROM executions_v2 WHERE broker_order_id=?').get(brokerOrderId))throw new Error('Broker outcome is unknown or already attributed');
+    this.db.raw.transaction(()=>{const linked=this.db.raw.prepare('UPDATE executions_v2 SET broker_order_id=? WHERE proposal_id=? AND broker_order_id IS NULL').run(brokerOrderId,id);if(linked.changes!==1)throw new Error('Unknown execution was already reviewed');this.ledger.updateOrder(e.order_id,'SUBMITTED',brokerOrderId);this.db.audit(actor,'UNKNOWN_OUTCOME_ORDER_LINK_REVIEW','proposal',id,{brokerOrderId,review,clientOrderId:JSON.parse(e.order_json).clientOrderId,ordersPlaced:0});})();return this.reconcile();
+  }
   async cancel(id:string,actor:string){
     if(this.busy)throw new Error('Trading workflow busy; cancel after the current action settles');
     const p=this.get(id),row=this.row(id);
-    if(['EXECUTION_SENT','RECONCILIATION_REQUIRED'].includes(p.state))throw new Error('Unknown broker outcome must reconcile, not cancel locally');
+    if(['EXECUTION_SENT','UNKNOWN_OUTCOME','RECONCILIATION_REQUIRED'].includes(p.state))throw new Error('Unknown broker outcome must reconcile, not cancel locally');
     if(['BROKER_ACCEPTED','PARTIALLY_FILLED'].includes(p.state)){
       const exec=this.db.raw.prepare('SELECT broker_order_id FROM executions_v2 WHERE proposal_id=?').get(id) as {broker_order_id:string};
-      if(!(await this.broker().cancel(exec.broker_order_id)).cancelled)throw new Error('Broker cancellation not confirmed');
+      const cancellation=await this.broker().cancel(exec.broker_order_id);if(!cancellation.cancelled){if(cancellation.pending){this.db.audit(actor,'BROKER_CANCEL_REQUEST_PENDING','proposal',id,{brokerOrderId:exec.broker_order_id});return this.get(id);}throw new Error('Broker cancellation not confirmed');}
       this.ledger.cancelOrder(row.order_id!,'V2 confirmed cancellation');this.release(id);
     }
     this.transition(id,'CANCELLED',actor);return this.get(id);
@@ -368,35 +387,39 @@ export class ProposalService {
     if(Date.now()-Date.parse(account.asOf)>60000||Date.now()-Date.parse(account.asOf)<-5000)mismatches.push('Stale account snapshot');
     // Import only attributable fills from verified scope before comparing broker ownership/cash.
     if(this.db.getMode()!=='SIMULATION'&&mismatches.length===0){
-      const pending=this.db.raw.prepare("SELECT proposal_id,broker_order_id FROM executions_v2 WHERE status='PENDING'").all() as Array<{proposal_id:string;broker_order_id:string|null}>;
+      const pending=this.db.raw.prepare("SELECT proposal_id,broker_order_id FROM executions_v2 WHERE status IN ('PENDING','UNKNOWN_OUTCOME')").all() as Array<{proposal_id:string;broker_order_id:string|null}>;
       for(const e of pending){if(!e.broker_order_id)continue;
-        for(const f of account.fills.filter(f=>f.brokerOrderId===e.broker_order_id))this.applyFill(e.proposal_id,f);
+        const observed=account.orders.find(o=>o.id===e.broker_order_id);if(observed&&this.get(e.proposal_id).state==='UNKNOWN_OUTCOME'&&['ACCEPTED','PARTIALLY_FILLED','FILLED'].includes(observed.status)){this.transition(e.proposal_id,'BROKER_ACCEPTED','RECONCILIATION',{brokerOrderId:observed.id});this.db.raw.prepare("UPDATE executions_v2 SET status='PENDING' WHERE proposal_id=?").run(e.proposal_id);}
+        for(const f of account.fills.filter(f=>f.brokerOrderId===e.broker_order_id)){if(f.fees===null){mismatches.push('Actual broker fill fees require review: '+f.id);continue;}this.applyFill(e.proposal_id,f);}
         const order=account.orders.find(o=>o.id===e.broker_order_id),p=this.get(e.proposal_id),row=this.row(e.proposal_id);
         if(order){const internalOrder=this.db.raw.prepare('SELECT cumulative_filled_quantity FROM orders WHERE id=?').get(row.order_id) as {cumulative_filled_quantity:number};if(Math.abs(order.filledQuantity-internalOrder.cumulative_filled_quantity)>0.000001){mismatches.push('Broker fill history incomplete '+e.broker_order_id);continue;}
-          if(['CANCELLED','REJECTED'].includes(order.status)&&!['FILLED','CANCELLED','REJECTED'].includes(p.state)){this.ledger.cancelOrder(row.order_id!,'Verified broker terminal status '+order.status);this.release(p.id);this.transition(p.id,'CANCELLED','RECONCILIATION',{brokerStatus:order.status,brokerOrderId:order.id});}
+          if(['CANCELLED','REJECTED'].includes(order.status)&&!['FILLED','CANCELLED','REJECTED'].includes(p.state)){if(order.status==='REJECTED'&&internalOrder.cumulative_filled_quantity===0)this.ledger.rejectOrder(row.order_id!,'Verified broker rejection','BROKER_REJECTED');else this.ledger.cancelOrder(row.order_id!,'Verified broker terminal status '+order.status);this.release(p.id);this.transition(p.id,order.status==='REJECTED'&&internalOrder.cumulative_filled_quantity===0?'REJECTED':'CANCELLED','RECONCILIATION',{brokerStatus:order.status,brokerOrderId:order.id});}
           if(order.status==='UNKNOWN'||order.status==='FILLED'&&this.get(p.id).state!=='FILLED')mismatches.push('Broker terminal outcome unresolved '+order.id);
         }else if(!['FILLED','CANCELLED','REJECTED'].includes(p.state))mismatches.push('Missing broker order '+e.broker_order_id);
       }
     }
+    const unavailableBasis=account.positions.filter(p=>p.averageCost===null).map(p=>p.symbol);
+    this.db.setSetting('reconciliation_warnings_v2',unavailableBasis.length?['Historical cost basis unavailable: '+unavailableBasis.join(', ')]:[]);
+    if(unavailableBasis.length&&!this.db.getSetting('initial_account_import_v2',null))mismatches.push('Unavailable basis acknowledgement required');
     const internal=this.ledger.aggregatePositions();
     for(const symbol of new Set([...internal.map(p=>p.symbol),...account.positions.map(p=>p.symbol)])){const actual=account.positions.filter(p=>p.symbol===symbol).reduce((n,p)=>n+p.quantity,0),virtual=internal.find(p=>p.symbol===symbol)?.quantity??0;if(Math.abs(actual-virtual)>0.000001)mismatches.push('Equity ownership mismatch: '+symbol);}
     const options=this.db.raw.prepare('SELECT option_id,contracts,collateral,instrument_json,reserved_shares FROM option_positions WHERE contracts<>0').all() as Array<{option_id:string;contracts:number;collateral:number;instrument_json:string;reserved_shares:number}>;
     for(const optionId of new Set([...options.map(p=>p.option_id),...account.options.map(p=>p.optionId)])){const a=account.options.find(p=>p.optionId===optionId),v=options.find(p=>p.option_id===optionId);if(a?.contracts!==v?.contracts||Math.abs((a?.collateral??0)-(v?.collateral??0))>0.01)mismatches.push('Options ownership/collateral mismatch: '+optionId);}
     for(const o of options){const i=JSON.parse(o.instrument_json);if(o.contracts<0&&i.type==='CALL'&&(this.ledger.getPosition('OPTIONS',i.underlying)?.quantity??0)<o.reserved_shares)mismatches.push('Covered call shares missing');}
     const cash=SLEEVES.reduce((n,s)=>n+this.ledger.getCash(s),0);if(Math.abs(cash-account.cash)>0.01||account.buyingPower<0)mismatches.push('Cash/buying-power mismatch');
-    const unknown=this.db.raw.prepare("SELECT proposal_id FROM executions_v2 WHERE status='PENDING' AND broker_order_id IS NULL").all() as Array<{proposal_id:string}>;
+    const unknown=this.db.raw.prepare("SELECT proposal_id FROM executions_v2 WHERE status IN ('PENDING','UNKNOWN_OUTCOME') AND broker_order_id IS NULL").all() as Array<{proposal_id:string}>;
     for(const e of unknown)mismatches.push('Unknown execution outcome '+e.proposal_id);
     this.ledger.markPrices(account.positions.map(p=>({symbol:p.symbol,price:p.price})));
     for(const o of account.options)this.db.raw.prepare('UPDATE option_positions SET mark_price=?,updated_at=? WHERE option_id=?').run(o.price,nowIso(),o.optionId);
     if(this.db.getMode()!=='SIMULATION'){
-      for(const o of account.orders)if(!this.db.raw.prepare('SELECT id FROM executions_v2 WHERE broker_order_id=?').get(o.id))mismatches.push('Unattributed broker order '+o.id);
+      for(const o of account.orders)if(!['FILLED','CANCELLED','REJECTED'].includes(o.status)&&!this.db.raw.prepare('SELECT id FROM executions_v2 WHERE broker_order_id=?').get(o.id))mismatches.push('Unattributed broker order '+o.id);
     }
     this.db.setSetting('reconciliation_clear',mismatches.length===0);this.db.setSetting('last_reconciliation_at',nowIso());this.db.setSetting('broker_account_v2',account);this.db.setSetting('reconciliation_v2',mismatches);
     this.db.setSetting('broker_account_observation_v2',null);
     this.db.setSetting('broker_verification_mode_v2',this.db.getMode());
-    if(mismatches.length)this.db.setSetting('global_pause',true);
+    if(mismatches.length){this.db.setSetting('global_pause',true);this.db.setSetting('v2_live_activation',false);this.db.setSetting('live_db_confirmation',false);if(this.db.getMode()==='LIVE')this.db.setSetting('operating_mode','READ_ONLY');}
     this.db.audit('RECONCILIATION','V2_RECONCILIATION','account',account.accountId,{mismatches});this.onEvent(mismatches.length?'RECONCILIATION_FAILURE':'RECONCILED',{accountId:account.accountId,mismatches});return {clear:mismatches.length===0,mismatches,account};
-    }catch(error){this.db.setSetting('reconciliation_clear',false);this.db.setSetting('global_pause',true);
+    }catch(error){this.db.setSetting('v2_live_activation',false);this.db.setSetting('live_db_confirmation',false);if(this.db.getMode()==='LIVE')this.db.setSetting('operating_mode','READ_ONLY');this.db.setSetting('reconciliation_clear',false);this.db.setSetting('global_pause',true);
       if(error instanceof BrokerBasisUnavailable){
         const a=error.observation,internal=this.ledger.aggregatePositions(),cash=SLEEVES.reduce((n,s)=>n+this.ledger.getCash(s),0);
         const differences=[error.message,...[...new Set([...internal.map(p=>p.symbol),...a.positions.map(p=>p.symbol)])].filter(symbol=>Math.abs((a.positions.find(p=>p.symbol===symbol)?.quantity??0)-(internal.find(p=>p.symbol===symbol)?.quantity??0))>.000001).map(symbol=>'Equity ownership mismatch: '+symbol)];

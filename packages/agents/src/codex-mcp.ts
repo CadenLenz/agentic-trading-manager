@@ -4,11 +4,12 @@ import {Ajv} from 'ajv';
 import {BROKER_READ_TOOLS,isolatedConfig,safeCodexEnvironment} from './codex-runner.js';
 
 export const DETERMINISTIC_BROKER_TOOLS=[...BROKER_READ_TOOLS,'get_equity_tradability','get_equity_tax_lots','get_realized_pnl','get_pnl_trade_history','review_equity_order','review_option_order'];
+export const DETERMINISTIC_EXECUTION_TOOLS=['place_equity_order','place_option_order','cancel_equity_order','cancel_option_order'];
 export interface BrokerTool {name:string;inputSchema:Record<string,unknown>;outputSchema?:Record<string,unknown>;description?:string}
 export interface BrokerResult {content:Array<{type:string;text?:string}>;structuredContent?:unknown;isError?:boolean|null}
-export interface BrokerTransport {catalog():Promise<BrokerTool[]>;call(name:string,args:Record<string,unknown>):Promise<BrokerResult>}
+export interface BrokerTransport {catalog():Promise<BrokerTool[]>;call(name:string,args:Record<string,unknown>):Promise<BrokerResult>;execute?(name:string,args:Record<string,unknown>):Promise<BrokerResult>}
 
-/** Fixed MCP RPCs only. No turn/start, model inference, credential export, or write tools. */
+/** Fixed MCP RPCs only. No model turns or credential export. Mutations use a separate deterministic executor RPC. */
 export class CodexMcpTransport implements BrokerTransport {
   private child:ChildProcessWithoutNullStreams|null=null;
   private pending=new Map<number,{resolve:(value:unknown)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
@@ -31,7 +32,7 @@ export class CodexMcpTransport implements BrokerTransport {
   private async initialize(){
     const args=['--strict-config','app-server',...isolatedConfig({robinhoodReads:false}),'-c','mcp_servers='+JSON.stringify({})];
     // CLI config overrides are TOML, not JSON objects. This replaces the whole server table.
-    args[args.length-1]='mcp_servers={robinhood-trading={url="https://agent.robinhood.com/mcp/trading",enabled_tools='+JSON.stringify(DETERMINISTIC_BROKER_TOOLS)+',startup_timeout_sec=20}}';
+    args[args.length-1]='mcp_servers={robinhood-trading={url="https://agent.robinhood.com/mcp/trading",enabled_tools='+JSON.stringify([...DETERMINISTIC_BROKER_TOOLS,...DETERMINISTIC_EXECUTION_TOOLS])+',startup_timeout_sec=20}}';
     const child=spawn(this.binary,args,{env:safeCodexEnvironment(),shell:false,windowsHide:true,stdio:['pipe','pipe','pipe']});this.child=child;
     child.stderr.resume();child.stdin.on('error',()=>this.close());
     child.on('error',()=>this.close());child.on('close',()=>{if(this.child===child)this.close();});
@@ -49,8 +50,9 @@ export class CodexMcpTransport implements BrokerTransport {
     const threadId=started.thread.id;
     const all:BrokerTool[]=[];let cursor:string|null=null;
     for(let page=0;page<20;page++){
-      const status=await this.request('mcpServerStatus/list',{threadId,limit:100,...(cursor?{cursor}:{})}) as {data:Array<{name:string;runtimeStatus?:string;tools:Record<string,BrokerTool>}>;nextCursor?:string|null};
-      const broker=status.data.find(s=>s.name==='robinhood-trading');if(broker){if(broker.runtimeStatus!=='connected')throw new Error('Robinhood MCP is not connected');all.push(...Object.values(broker.tools).filter(t=>DETERMINISTIC_BROKER_TOOLS.includes(t.name)));}
+      let status=await this.request('mcpServerStatus/list',{threadId,limit:100,...(cursor?{cursor}:{})}) as {data:Array<{name:string;runtimeStatus?:string;tools:Record<string,BrokerTool>}>;nextCursor?:string|null};
+      for(let attempt=0;attempt<20&&status.data.find(s=>s.name==='robinhood-trading')?.runtimeStatus==='starting';attempt++){await new Promise(resolve=>setTimeout(resolve,500));status=await this.request('mcpServerStatus/list',{threadId,limit:100,...(cursor?{cursor}:{})}) as typeof status;}
+      const broker=status.data.find(s=>s.name==='robinhood-trading');if(broker){if(broker.runtimeStatus!=='connected')throw new Error('Robinhood MCP is not connected');all.push(...Object.values(broker.tools).filter(t=>[...DETERMINISTIC_BROKER_TOOLS,...DETERMINISTIC_EXECUTION_TOOLS].includes(t.name)));}
       cursor=status.nextCursor??null;if(!cursor)break;if(page===19)throw new Error('MCP catalog pagination limit');
     }
     if(!all.some(t=>t.name==='get_accounts'))throw new Error('Robinhood account capability unavailable');
@@ -59,6 +61,10 @@ export class CodexMcpTransport implements BrokerTransport {
   async catalog(){await this.start();return this.tools;}
   async call(name:string,args:Record<string,unknown>){
     if(!DETERMINISTIC_BROKER_TOOLS.includes(name))throw new Error('Broker tool is not a permitted read or preview');
+    return this.rpc(name,args);
+  }
+  async execute(name:string,args:Record<string,unknown>){if(!DETERMINISTIC_EXECUTION_TOOLS.includes(name))throw new Error('Unsupported deterministic mutation');return this.rpc(name,args);}
+  private async rpc(name:string,args:Record<string,unknown>){
     await this.start();const tool=this.tools.find(t=>t.name===name);if(!tool||!new Ajv({strict:false}).compile(tool.inputSchema)(args))throw new Error('Broker arguments do not match the discovered schema');
     const result=await this.request('mcpServer/tool/call',{threadId:this.threadId,server:'robinhood-trading',tool:name,arguments:args}) as BrokerResult;
     if(result.isError)throw new Error('Robinhood read or preview failed');

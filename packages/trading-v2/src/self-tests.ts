@@ -23,6 +23,9 @@ export async function runSelfTests(){
     service.approve(p.id,1,'SELF_TEST');await service.execute(p.id,'SELF_TEST');assert('Simulation lifecycle FILLED',service.get(p.id).state==='FILLED');
     const cash=ledger.getCash(p.strategy);await service.execute(p.id,'SELF_TEST');assert('Execution replay is idempotent',ledger.getCash(p.strategy)===cash);
     db.setSetting('global_pause',true);const other=service.create(exampleProposal(),'SELF_TEST');assert('Global pause blocks risk',!(await service.risk(other.id)).approved);
+    db.setSetting('stopped',true);db.setSetting('global_pause',false);
+    const closing=service.create({...exampleProposal(),side:'SELL',positionEffect:'CLOSE'},'SELF_TEST');
+    const stoppedRisk=await service.risk(closing.id);assert('STOP blocks closing transactions too',stoppedRisk.checks.some(c=>c.code==='MAINTENANCE_STOP'&&!c.ok));
     return {ok:true,checks,simulated:true,brokerCalls:'synthetic only'};
   }catch(error){return {ok:false,checks,error:error instanceof Error?error.message:'Self-test failure',simulated:true};}finally{db.close();}
 }

@@ -43,7 +43,7 @@ export class StrategyAllocationManager {
     }
     return {strategy:sleeve,policy:this.policy(sleeve),startingCapital:c.starting_capital,weeklyStartingCapital:c.weekly_starting_capital,highWaterMark:c.high_water_mark,currentEquity,
       cash:s.cash,reservedCapital:roundMoney(heldCollateral+pending.cash),availableCapital:roundMoney(Math.max(0,s.cash-heldCollateral-pending.cash)),
-      realizedPnL:this.ledger.getRealizedPnl(sleeve),unrealizedPnL:roundMoney(positions.reduce((n,p)=>n+p.unrealizedPnl,0)+optionUnrealized),drawdown,
+      realizedPnL:this.ledger.getRealizedPnl(sleeve),unrealizedPnL:positions.some(p=>p.unrealizedPnl===null)?null:roundMoney(positions.reduce((n,p)=>n+p.unrealizedPnl!,0)+optionUnrealized),drawdown,
       capitalAtRisk:roundMoney(stockValue+options.reduce((n,p)=>n+(p.contracts>0?p.contracts*100*p.mark_price:p.collateral),0)),
       killed:!!c.killed,killReason:c.kill_reason,positions,options};
   }
@@ -90,16 +90,16 @@ export class StrategyAllocationManager {
     if(p.quantity-quantity<reservations.shares+covered.shares) throw new Error('Shares are reserved for option coverage');
     this.db.raw.transaction(()=>{
       const existing=this.ledger.getPosition(to,symbol); const total=(existing?.quantity??0)+quantity;
-      this.db.raw.prepare('INSERT INTO strategy_positions VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(strategy_id,symbol) DO UPDATE SET quantity=excluded.quantity,average_cost=excluded.average_cost').run(to,symbol,total,((existing?.quantity??0)*(existing?.averageCost??0)+quantity*p.averageCost)/total,p.marketPrice,p.sector,p.assetType,nowIso());
+      this.db.raw.prepare('INSERT INTO strategy_positions VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(strategy_id,symbol) DO UPDATE SET quantity=excluded.quantity,average_cost=excluded.average_cost').run(to,symbol,total,p.averageCost===null||existing?.averageCost===null?null:((existing?.quantity??0)*(existing?.averageCost??0)+quantity*p.averageCost)/total,p.marketPrice,p.sector,p.assetType,nowIso());
       this.db.raw.prepare('UPDATE strategy_positions SET quantity=quantity-? WHERE strategy_id=? AND symbol=?').run(quantity,from,symbol);
       let left=quantity;
       const lots=this.db.raw.prepare('SELECT * FROM strategy_lots WHERE strategy_id=? AND symbol=? AND remaining_quantity>0 ORDER BY opened_at,id').all(from,symbol) as Array<{id:string;remaining_quantity:number;entry_price:number;fees:number;opened_at:string;source_fill_id:string}>;
       for(const l of lots){const q=Math.min(left,l.remaining_quantity); if(q<=0) break; const fees=l.fees*q/l.remaining_quantity; this.db.raw.prepare('UPDATE strategy_lots SET remaining_quantity=remaining_quantity-?,fees=fees-? WHERE id=?').run(q,fees,l.id);this.db.raw.prepare('INSERT INTO strategy_lots VALUES(?,?,?,?,?,?,?,?)').run(makeId('lot'),to,symbol,q,l.entry_price,fees,l.opened_at,l.source_fill_id);left-=q;}
       if(left>0.000001) throw new Error('Lot inconsistency');
       for(const s of [from,to]){
-        const b=this.db.raw.prepare('SELECT COALESCE(SUM(remaining_quantity*entry_price+fees),0) AS basis,COALESCE(SUM(remaining_quantity),0) AS quantity FROM strategy_lots WHERE strategy_id=? AND symbol=? AND remaining_quantity>0').get(s,symbol) as {basis:number;quantity:number};
+        const b=this.db.raw.prepare('SELECT CASE WHEN SUM(entry_price IS NULL)>0 THEN NULL ELSE COALESCE(SUM(remaining_quantity*entry_price+fees),0) END AS basis,COALESCE(SUM(remaining_quantity),0) AS quantity FROM strategy_lots WHERE strategy_id=? AND symbol=? AND remaining_quantity>0').get(s,symbol) as {basis:number|null;quantity:number};
         if(b.quantity<=0.000001)this.db.raw.prepare('DELETE FROM strategy_positions WHERE strategy_id=? AND symbol=?').run(s,symbol);
-        else this.db.raw.prepare('UPDATE strategy_positions SET average_cost=? WHERE strategy_id=? AND symbol=?').run(b.basis/b.quantity,s,symbol);
+        else this.db.raw.prepare('UPDATE strategy_positions SET average_cost=? WHERE strategy_id=? AND symbol=?').run(b.basis===null?null:b.basis/b.quantity,s,symbol);
       }
       for(const [s,delta] of [[from,-quantity*p.marketPrice],[to,quantity*p.marketPrice]] as const)this.db.raw.prepare('UPDATE strategy_capital SET starting_capital=starting_capital+?,weekly_starting_capital=weekly_starting_capital+?,high_water_mark=MAX(0,high_water_mark+?) WHERE strategy_id=?').run(delta,delta,delta,s);
       this.db.raw.prepare('INSERT INTO position_assignments VALUES(?,?,?,?,?,?,?,?)').run(makeId('assignment'),symbol,from,to,quantity,reason,actor,nowIso());

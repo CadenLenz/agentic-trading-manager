@@ -1,3 +1,5 @@
+import {officialOrderArguments} from './official-orders.js';
+import type {ExecutableOrder} from './model.js';
 import {readFileSync,writeFileSync,existsSync,mkdirSync,chmodSync,renameSync,rmSync} from 'node:fs';
 import {dirname,join} from 'node:path';
 import {createCipheriv,createDecipheriv,createHash,randomBytes} from 'node:crypto';
@@ -75,6 +77,34 @@ export class OfficialRobinhoodConnection{
     if(this.usesWorker)await this.check('BROKER_READ');if(!this.client&&!this.usesWorker)throw new Error('Connect Robinhood first');const tool=this.tools.get(name);if(!tool)throw new Error('Official capability not discovered');const validate=new Ajv({strict:false,allErrors:true}).compile(tool.inputSchema);if(!validate(args))throw new Error('Arguments do not match discovered official MCP schema');
     const account=process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID;if(name!=='get_accounts'&&name!=='get_equity_news'&&Object.keys(args).some(k=>/account/i.test(k)&&args[k]!==account))throw new Error('Broker account scope mismatch');
     try{const result=this.usesWorker?await this.worker.brokerCall(name,args):await this.client!.callTool({name,arguments:args},undefined,{timeout:20000});if(result.isError)throw new Error('Official MCP read/preview returned an error');const structured=result.structuredContent;if(tool.outputSchema&&structured&&!new Ajv({strict:false}).compile(tool.outputSchema)(structured))throw new Error('MCP output contract mismatch');const validated=!!this.accountValidation&&this.accountValidation.accountId===account&&Date.now()-this.accountValidation.at<120000;this.status(validated?'READ_ONLY':'CONNECTED',null,{lastTool:name,readValidated:validated,placementEnabled:false,transport:this.usesWorker?'CODEX_WORKER':'DIRECT_OAUTH'});return result;}catch(error){this.accountValidation=null;this.status('ERROR','MCP read/preview failed');this.db.setSetting('reconciliation_clear',false);this.db.setSetting('global_pause',true);throw error;}
+  }
+  /** Only the proposal executor invokes this; generic connector APIs remain read/preview only. */
+  async execute(name:string,args:Record<string,unknown>,proposalId:string){
+    if(!this.usesWorker||!['place_equity_order','place_option_order','cancel_equity_order','cancel_option_order'].includes(name))throw new Error('Unsupported broker execution transport');
+    const cancelling=name.startsWith('cancel_');
+    const row=this.db.raw.prepare('SELECT p.version,p.state,p.approval_json,p.preview_hash,e.order_json,e.broker_order_id FROM proposals p JOIN executions_v2 e ON e.proposal_id=p.id WHERE p.id=?').get(proposalId) as {version:number;state:string;approval_json:string|null;preview_hash:string;order_json:string;broker_order_id:string|null}|undefined;
+    if(!row)throw new Error('Execution attribution required');
+    if(args.account_number!==process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID)throw new Error('Broker account scope mismatch');
+    if(cancelling){if(args.order_id!==row.broker_order_id||!['BROKER_ACCEPTED','PARTIALLY_FILLED'].includes(row.state))throw new Error('Cancel requires an attributed open broker order');}
+    else{
+      const approval=JSON.parse(row.approval_json??'null') as {version:number;hash:string;expiresAt:string}|null;
+      if(this.db.getMode()!=='LIVE'||!this.db.getSetting('v2_live_activation',false)||!this.db.getSetting('live_db_confirmation',false)||this.db.getSetting('global_pause',true)||this.db.getSetting('stopped',false)||this.db.getSetting('maintenance_mode',false)||!this.db.getSetting('reconciliation_clear',false))throw new Error('Manual LIVE execution gates are closed');
+      if(JSON.stringify(args)!==JSON.stringify(officialOrderArguments(JSON.parse(row.order_json) as ExecutableOrder,process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID!,true)))throw new Error('Broker mutation differs from the approved executable order');
+      if(row.state!=='EXECUTION_SENT'||!approval||approval.version!==row.version||approval.hash!==row.preview_hash||Date.parse(approval.expiresAt)<=Date.now())throw new Error('Current manual approval required');
+    }
+    await this.check('DETERMINISTIC_EXECUTOR');const tool=this.tools.get(name);
+    if(!tool||!new Ajv({strict:false}).compile(tool.inputSchema)(args))throw new Error('Execution arguments do not match the discovered official schema');
+    if(!cancelling){
+      const current=this.db.raw.prepare('SELECT version,state,approval_json,preview_hash FROM proposals WHERE id=?').get(proposalId) as typeof row;
+      const approval=JSON.parse(current?.approval_json??'null') as {version:number;hash:string;expiresAt:string}|null;
+      const order=JSON.parse(row.order_json) as ExecutableOrder;
+      if(this.db.getMode()!=='LIVE'||this.db.getSetting('stopped',false)||this.db.getSetting('global_pause',true)||this.db.getSetting('maintenance_mode',false)||!this.db.getSetting('reconciliation_clear',false)||!this.db.getSetting('live_db_confirmation',false)||!this.db.getSetting('v2_live_activation',false)||!this.db.getStrategy(order.strategy)?.enabled)throw new Error('STOP/pause revoked execution before broker submission');
+      if(!current||current.state!=='EXECUTION_SENT'||!approval||approval.version!==current.version||approval.hash!==current.preview_hash||Date.parse(approval.expiresAt)<=Date.now())throw new Error('Manual approval expired before broker submission');
+    }
+    this.db.audit('EXECUTION_ENGINE','BROKER_MUTATION_SENT','proposal',proposalId,{name,arguments:args,retry:false});
+    const result=await this.worker.brokerExecute(name,args);
+    if(result.isError||!result.structuredContent||tool.outputSchema&&!new Ajv({strict:false}).compile(tool.outputSchema)(result.structuredContent))throw new Error('Broker mutation outcome unverified; reconcile without retry');
+    return result;
   }
   private status(state:ConnectorState,error:string|null,details:Record<string,unknown>={}){const body:ConnectorStatus={id:'ROBINHOOD',state,configured:this.usesWorker?!this.db.getSetting('worker_broker_disconnected',false):!!this.oauth?.tokens(),lastSuccess:['CONNECTED','READ_ONLY','LIVE_CAPABLE'].includes(state)&&!error?nowIso():null,lastError:error,details};this.db.raw.prepare('INSERT INTO connector_status VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body_json=excluded.body_json,updated_at=excluded.updated_at').run('ROBINHOOD',JSON.stringify(body),nowIso());this.db.audit('CONNECTORS','CONNECTOR_STATUS','connector','ROBINHOOD',{state,error});}
   validateAccount(accountId:string){if(accountId!==process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID){this.recordDiagnostic('ACCOUNT_SCOPE','BROKER_ACCOUNT_MISMATCH','ERROR');throw new Error('Wrong scoped account');}this.accountValidation={accountId,at:Date.now()};this.status('READ_ONLY',null,{accountScope:accountId,readValidated:true,placementEnabled:false});}

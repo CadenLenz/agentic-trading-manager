@@ -7,7 +7,7 @@ export const executionPolicySchema = z.enum(['MANUAL_APPROVAL', 'AUTONOMOUS_RISK
 export type ExecutionPolicy = z.infer<typeof executionPolicySchema>;
 export const agentModeSchema = z.enum(['ADVISOR', 'OPERATOR', 'AUTONOMOUS']);
 export type AgentMode = z.infer<typeof agentModeSchema>;
-export const states = ['DRAFT', 'RESEARCHED', 'SUBMITTED_TO_RISK', 'RISK_REJECTED', 'RISK_APPROVED', 'BROKER_PREVIEWED', 'READY_TO_EXECUTE', 'EXECUTION_SENT', 'BROKER_ACCEPTED', 'PARTIALLY_FILLED', 'FILLED', 'CANCELLED', 'REJECTED', 'FAILED', 'RECONCILIATION_REQUIRED', 'CLOSED'] as const;
+export const states = ['DRAFT', 'RESEARCHED', 'SUBMITTED_TO_RISK', 'RISK_REJECTED', 'RISK_APPROVED', 'BROKER_PREVIEWED', 'READY_TO_EXECUTE', 'EXECUTION_SENT', 'BROKER_ACCEPTED', 'PARTIALLY_FILLED', 'FILLED', 'CANCELLED', 'REJECTED', 'FAILED', 'RECONCILIATION_REQUIRED', 'UNKNOWN_OUTCOME', 'CLOSED'] as const;
 export type ProposalState = typeof states[number];
 const symbol = z.string().trim().toUpperCase().regex(/^[A-Z][A-Z0-9.-]{0,9}$/);
 export const proposalSchema = z.object({
@@ -71,18 +71,18 @@ export const accountPolicySchema = z.object({
 export type AccountPolicy = z.infer<typeof accountPolicySchema>;
 export const DEFAULT_ACCOUNT_POLICY: AccountPolicy = { maxDailyRealizedLoss: 25, maxTotalDailyLoss: 40, maxGrossExposurePercent: 90, minimumCashReserve: 25, maxPositions: 12, maxOrdersPerDay: 12, maxOrdersPerMinute: 3, maxOrderNotional: 250, lossCooldownMinutes: 60, maxQuoteAgeSeconds: 60, maxProposalAgeSeconds: 900, maxResearchAgeHours: 24, optionsLevel: 2, allowLevel3: false, allowBorrowing: false };
 export interface OptionInstrument { optionId: string; underlying: string; type: 'CALL' | 'PUT'; strike: number; expiration: string; multiplier: 100 }
-export interface TrustedQuote { symbol: string; price: number; bid: number; ask: number; volume: number; asOf: string; tradingEligible: boolean; option?: OptionInstrument; usListed?:boolean; leveraged?:boolean; assetClass?:'EQUITY'|'ETF'|'OPTION'; sector?:string; marketCap?:number; relativeVolume?:number; atrPercent?:number; valuationPE?:number; setupScore?:number; earningsWithinHolding?:boolean; openInterest?:number; delta?:number; gamma?:number; theta?:number; vega?:number; iv?:number; underlyingPrice?:number; underlyingVolume?:number; provenance?:string }
+export interface TrustedQuote { symbol: string; price: number; bid: number; ask: number; volume: number; asOf: string; tradingEligible: boolean; option?: OptionInstrument; usListed?:boolean; leveraged?:boolean; assetClass?:'EQUITY'|'ETF'|'OPTION'|undefined; sector?:string; marketCap?:number; relativeVolume?:number; atrPercent?:number; valuationPE?:number; setupScore?:number; earningsWithinHolding?:boolean; openInterest?:number; delta?:number; gamma?:number; theta?:number; vega?:number; iv?:number; underlyingPrice?:number; underlyingVolume?:number; provenance?:string }
 export interface ExecutableOrder {
   clientOrderId: string; strategy: Sleeve; assetClass: ProposalInput['assetClass']; symbol: string; underlying: string | null;
   side: 'BUY' | 'SELL'; positionEffect: 'OPEN' | 'CLOSE'; quantity: number; orderType: ProposalInput['orderType'];
   limitPrice: number | null; stopPrice: number | null; timeInForce: 'DAY' | 'GTC'; marketHours: 'REGULAR' | 'EXTENDED'; option: OptionInstrument | null;
 }
 export interface BrokerPreview { approved: boolean; asOf: string; estimatedCost: number; collateralRequired: number; reason: string; raw?: unknown }
-export interface BrokerFill { id: string; brokerOrderId: string; quantity: number; price: number; fees: number; executedAt: string }
+export interface BrokerFill { id: string; brokerOrderId: string; quantity: number; price: number; fees: number|null; executedAt: string }
 export interface TradingAccount {
   accountId: string; agentic: boolean; cash: number; buyingPower: number; netAccountValue: number; optionsLevel: number;
   asOf: string; healthy: boolean; complete: boolean;
-  positions: Array<{ symbol: string; quantity: number; averageCost: number; price: number; assetClass: 'EQUITY' | 'ETF' }>;
+  positions: Array<{ symbol: string; quantity: number; averageCost: number|null; basisStatus?: "KNOWN"|"UNAVAILABLE_EXTERNAL"|undefined; price: number; assetClass: 'EQUITY' | 'ETF' }>;
   options: Array<{ optionId: string; contracts: number; averagePremium: number; price: number; collateral: number }>;
   orders: Array<{ id: string; clientOrderId: string | null; status: string; filledQuantity: number }>; fills: BrokerFill[];
 }
@@ -92,5 +92,6 @@ export interface TradingBroker {
   quote(p: ProposalInput): Promise<TrustedQuote>;
   preview(order: ExecutableOrder): Promise<BrokerPreview>;
   place(order: ExecutableOrder): Promise<{ id: string; status: 'ACCEPTED' | 'REJECTED' | 'UNKNOWN'; fills: BrokerFill[] }>;
-  cancel(id: string): Promise<{ cancelled: boolean }>;
+  cancel(id: string): Promise<{ cancelled: boolean; pending?:boolean }>;
+  lookup?(order:ExecutableOrder,id:string):Promise<{order:TradingAccount["orders"][number];fills:BrokerFill[]}>;
 }

@@ -5,6 +5,17 @@ import type { ProposalService } from './proposals.js';
 import type { Sleeve } from './model.js';
 
 export function zonedDate(date:Date,timezone='America/New_York'):string {return new Intl.DateTimeFormat('en-CA',{timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit'}).format(date);}
+export async function verifyCalendar2026(db:AppDatabase){
+  if(new Date().getUTCFullYear()!==2026)throw new Error('The new year requires a reviewed exchange calendar update');
+  const source='https://www.nyse.com/trade/hours-calendars';
+  const response=await fetch(source,{signal:AbortSignal.timeout(15000)});if(!response.ok)throw new Error('Official exchange calendar unavailable');
+  const html=await response.text(),rows=[...html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)].map(r=>[...r[1]!.matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(c=>c[1]!.replace(/<[^>]+>/g,' ').replace(/&nbsp;/g,' ').replace(/\s+/g,' ').trim()));
+  const expected=['Thursday, January 1','Monday, January 19','Monday, February 16','Friday, April 3','Monday, May 25','Friday, June 19','Friday, July 3','Monday, September 7','Thursday, November 26','Friday, December 25'];
+  const header=rows.find(r=>r[0]==='Holiday');if(!header||header[1]!=='2026'||!expected.every(d=>rows.some(r=>r[1]?.startsWith(d))))throw new Error('Official calendar changed or could not be parsed; do not assume market hours');
+  const text=html.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ');
+  if(!text.includes('Friday, November 27, 2026')||!text.includes('Thursday, December 24, 2026'))throw new Error('Early-close calendar unverified');
+  const at=nowIso();db.raw.prepare("UPDATE market_sessions SET verified_at=?,source=? WHERE date LIKE '2026-%'").run(at,source);db.audit('CALENDAR','OFFICIAL_CALENDAR_VERIFIED','system',null,{source,at,year:2026});return {source,verifiedAt:at};
+}
 export function seedCalendar2026(db:AppDatabase):void {
   // Official NYSE snapshot checked 2026-09-16; expires for LIVE and must be reverified by the operator.
   const closed=new Set(['2026-01-01','2026-01-19','2026-02-16','2026-04-03','2026-05-25','2026-06-19','2026-07-03','2026-09-07','2026-11-26','2026-12-25']);

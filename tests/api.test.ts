@@ -32,6 +32,14 @@ describe('API authentication and confirmation boundaries', () => {
     const withCsrf = await app.inject({ method: 'POST', url: '/api/system/pause', headers: { cookie: session.cookie, 'x-csrf-token': session.csrf }, payload: { paused: true } }); expect(withCsrf.statusCode).toBe(200); expect(manager.database.getSetting('global_pause')).toBe(true);
   });
 
+  it('renders unavailable basis as null and refuses LIVE without reviewed account evidence',async()=>{
+    const session=await setupSession(app),headers={cookie:session.cookie,'x-csrf-token':session.csrf};
+    manager.database.raw.prepare('INSERT INTO strategy_positions VALUES(?,?,?,?,?,?,?,?)').run('AGGRESSIVE_STOCKS','EXTERNAL',1,null,10,'Unknown','EQUITY',new Date().toISOString());
+    const response=await app.inject({method:'GET',url:'/api/dashboard',headers});expect(response.statusCode).toBe(200);expect(response.json().metrics.unrealizedPnl).toBeNull();expect(response.json().positions[0]).toMatchObject({averageCost:null,basisStatus:'UNAVAILABLE_EXTERNAL',unrealizedPnl:null});
+    expect((manager.database.raw.prepare('PRAGMA table_info(performance_snapshots)').all() as Array<{name:string;notnull:number}>).find(c=>c.name==='unrealized_pnl')?.notnull).toBe(0);
+    const live=await app.inject({method:'POST',url:'/api/system/mode',headers,payload:{mode:'LIVE',confirmation:'ENABLE LIVE TRADING'}});expect(live.statusCode).toBe(409);expect(manager.database.getMode()).not.toBe('LIVE');expect(manager.database.getSetting('v2_live_activation',false)).toBe(false);
+  });
+
   it('requires explicit confirmation before a strategy change is committed', async () => {
     const session = await setupSession(app); const strategy = manager.database.getStrategy('AGGRESSIVE_STOCKS')!;
     const proposed = await app.inject({ method: 'POST', url: '/api/strategies/AGGRESSIVE_STOCKS/change', headers: { cookie: session.cookie, 'x-csrf-token': session.csrf }, payload: { config: { ...strategy.config, maxTradesPerDay: 4 }, reason: 'Test confirmation flow' } });

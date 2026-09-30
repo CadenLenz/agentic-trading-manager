@@ -1,0 +1,302 @@
+{
+  "place_equity_order": {
+    "type": "object",
+    "properties": {
+      "account_number": {
+        "type": "string"
+      },
+      "symbol": {
+        "type": "string"
+      },
+      "side": {
+        "type": "string"
+      },
+      "type": {
+        "type": "string"
+      },
+      "quantity": {
+        "type": "string"
+      },
+      "dollar_amount": {
+        "type": "string"
+      },
+      "limit_price": {
+        "type": "string"
+      },
+      "stop_price": {
+        "type": "string"
+      },
+      "time_in_force": {
+        "type": "string"
+      },
+      "market_hours": {
+        "type": "string"
+      },
+      "tax_lots": {
+        "type": [
+          "null",
+          "array"
+        ],
+        "items": {
+          "type": "object",
+          "properties": {
+            "open_lot_id": {
+              "type": "string"
+            },
+            "quantity": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "open_lot_id",
+            "quantity"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "ref_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "account_number",
+      "symbol",
+      "side",
+      "type"
+    ],
+    "additionalProperties": false
+  },
+  "review_option_order": {
+    "type": "object",
+    "properties": {
+      "account_number": {
+        "type": "string"
+      },
+      "legs": {
+        "type": [
+          "null",
+          "array"
+        ],
+        "items": {
+          "type": "object",
+          "properties": {
+            "option_id": {
+              "type": "string"
+            },
+            "side": {
+              "type": "string"
+            },
+            "position_effect": {
+              "type": "string"
+            },
+            "ratio_quantity": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "option_id",
+            "side",
+            "position_effect"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "direction": {
+        "type": "string"
+      },
+      "type": {
+        "type": "string"
+      },
+      "quantity": {
+        "type": "string"
+      },
+      "price": {
+        "type": "string"
+      },
+      "stop_price": {
+        "type": "string"
+      },
+      "time_in_force": {
+        "type": "string"
+      },
+      "market_hours": {
+        "type": "string"
+      },
+      "chain_symbol": {
+        "type": "string"
+      },
+      "underlying_type": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "account_number",
+      "legs",
+      "quantity"
+    ],
+    "additionalProperties": false
+  },
+  "review_equity_order": {
+    "type": "object",
+    "properties": {
+      "account_number": {
+        "type": "string"
+      },
+      "symbol": {
+        "type": "string"
+      },
+      "side": {
+        "type": "string"
+      },
+      "type": {
+        "type": "string"
+      },
+      "quantity": {
+        "type": "string"
+      },
+      "dollar_amount": {
+        "type": "string"
+      },
+      "limit_price": {
+        "type": "string"
+      },
+      "stop_price": {
+        "type": "string"
+      },
+      "time_in_force": {
+        "type": "string"
+      },
+      "market_hours": {
+        "type": "string"
+      },
+      "tax_lots": {
+        "type": [
+          "null",
+          "array"
+        ],
+        "items": {
+          "type": "object",
+          "properties": {
+            "open_lot_id": {
+              "type": "string"
+            },
+            "quantity": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "open_lot_id",
+            "quantity"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "required": [
+      "account_number",
+      "symbol",
+      "side",
+      "type"
+    ],
+    "additionalProperties": false
+  },
+  "place_option_order": {
+    "type": "object",
+    "properties": {
+      "account_number": {
+        "type": "string"
+      },
+      "legs": {
+        "type": [
+          "null",
+          "array"
+        ],
+        "items": {
+          "type": "object",
+          "properties": {
+            "option_id": {
+              "type": "string"
+            },
+            "side": {
+              "type": "string"
+            },
+            "position_effect": {
+              "type": "string"
+            },
+            "ratio_quantity": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "option_id",
+            "side",
+            "position_effect"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "direction": {
+        "type": "string"
+      },
+      "type": {
+        "type": "string"
+      },
+      "quantity": {
+        "type": "string"
+      },
+      "price": {
+        "type": "string"
+      },
+      "stop_price": {
+        "type": "string"
+      },
+      "time_in_force": {
+        "type": "string"
+      },
+      "market_hours": {
+        "type": "string"
+      },
+      "ref_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "account_number",
+      "legs",
+      "quantity"
+    ],
+    "additionalProperties": false
+  },
+  "cancel_option_order": {
+    "type": "object",
+    "properties": {
+      "account_number": {
+        "type": "string"
+      },
+      "order_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "account_number",
+      "order_id"
+    ],
+    "additionalProperties": false
+  },
+  "cancel_equity_order": {
+    "type": "object",
+    "properties": {
+      "account_number": {
+        "type": "string"
+      },
+      "order_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "account_number",
+      "order_id"
+    ],
+    "additionalProperties": false
+  }
+}
