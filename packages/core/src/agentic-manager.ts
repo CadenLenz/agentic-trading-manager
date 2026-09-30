@@ -24,6 +24,7 @@ import { JOB_PRIORITY } from '../../agents/src/job-queue.js';
 import { StrategyAllocationManager } from '../../trading-v2/src/capital.js';
 import { ProposalService } from '../../trading-v2/src/proposals.js';
 import { SimulationTradingBroker } from '../../trading-v2/src/broker.js';
+import {WorkerRobinhoodBroker} from '../../trading-v2/src/worker-broker.js';
 import {VerifiedReadOnlyMcpBroker} from '../../trading-v2/src/mcp-binding.js';
 import { PersistentTradingAgent } from '../../trading-v2/src/agent.js';
 import { PersistedTradingScheduler } from '../../trading-v2/src/scheduling.js';
@@ -47,6 +48,7 @@ export class AgenticManager {
   readonly directives: DirectiveService;
   readonly risk: RiskEngine;
   readonly market: MarketDataProvider;
+  readonly liveBroker: TradingBroker;
   readonly simulation: SimulationBroker;
   readonly codex: CodexRunner;
   readonly codexTasks: CodexTaskService;
@@ -101,7 +103,8 @@ export class AgenticManager {
     this.fullSimulation=new FullSystemSimulation(this.database,join(dataDirectory,'simulations'),event=>{this.events.publish({type:'SIMULATION_EVENT',severity:'INFO',source:'SIMULATION',payload:{...event}});});
     this.productionReadiness=new ProductionReadiness(this.database);this.piAcceptance=new PiAcceptanceService(this.database,join(dataDirectory,'acceptance-backups'));
     this.brokerEvents=new BrokerEventService(this.database,this.ledger,this.analytics);
-    const simBroker=new SimulationTradingBroker(this.database,this.ledger,this.market),liveBroker=options.liveBroker??new VerifiedReadOnlyMcpBroker(this.connectors.robinhood);
+    const simBroker=new SimulationTradingBroker(this.database,this.ledger,this.market),liveBroker=options.liveBroker??(this.connectors.robinhood.usesWorker?new WorkerRobinhoodBroker(this.connectors.robinhood):new VerifiedReadOnlyMcpBroker(this.connectors.robinhood));
+    this.liveBroker=liveBroker;
     this.proposals=new ProposalService(this.database,this.ledger,this.allocation,()=>this.database.getMode()==='SIMULATION'?simBroker:liveBroker);
     this.proposals.reporter=kind=>this.analytics.report(kind);
     this.proposals.onQuote=(p,q)=>{if(p.option)this.analytics.recordOption(p.option.optionId,q);};

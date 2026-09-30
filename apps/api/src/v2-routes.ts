@@ -12,11 +12,11 @@ export function readiness(m:AgenticManager){
   const checks={ownershipReviewed:!db.getSetting('v2_migration_review_required',false),reconciled:db.getSetting('reconciliation_clear',false),
     accountFresh:!!a&&Date.now()-Date.parse(a.asOf)<=60000&&Date.now()-Date.parse(a.asOf)>=-5000,accountScope:!!a?.agentic&&!!a.complete&&a.accountId===process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID,readOnlyVerification:['READ_ONLY','LIVE'].includes(db.getSetting('broker_verification_mode_v2','SIMULATION')),
     optionsLevel:a?.optionsLevel===2,selfTests:db.getSetting('self_tests_v2',false),simulatedLifecycle:db.getSetting('simulated_lifecycle_v2',false),
-    deterministicBroker:!!m.options.liveBroker?.deterministic,verifiedMarketData:m.market.tradingEligible,
+    deterministicBroker:!!m.liveBroker.deterministic,verifiedMarketData:m.market.tradingEligible,
     calendarFresh:!!db.raw.prepare('SELECT date FROM market_sessions WHERE opens_at<=? AND closes_at>? AND verified_at>?').get(nowIso(),nowIso(),new Date(Date.now()-7*86400000).toISOString())};
   return {ready:Object.values(checks).every(Boolean),checks,liveActivation:db.getSetting('v2_live_activation',false),mode:db.getMode(),
     schemaVersion:(db.raw.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as {v:number}).v,gitSha:process.env.APP_GIT_SHA??'unrecorded',version:'2.0.0',uptime:m.health().uptimeSeconds,
-    limitation:m.options.liveBroker?'Broker binding supplied; runtime verification required':'LIVE unavailable: deterministic official MCP binding and verified market-data integration are not installed'};
+    limitation:'LIVE remains locked pending complete reconciliation, execution-grade market data, preview and placement commissioning'};
 }
 export function registerV2(app:FastifyInstance,m:AgenticManager){
   const db=m.database;

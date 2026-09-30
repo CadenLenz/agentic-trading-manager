@@ -6,6 +6,7 @@ import {z} from 'zod';
 import {CodexRunner,safeCodexEnvironment,scrubLog} from './codex-runner.js';
 import {taskInput,taskResponse,taskPrompt,validateAuthority,type TaskInput,type TaskResponse} from './task-contract.js';
 import {stableHash} from '../../core/src/utils.js';
+import type {BrokerTransport} from './codex-mcp.js';
 
 const exec=(file:string,args:string[],options:{timeout:number;maxBuffer:number;env:NodeJS.ProcessEnv})=>new Promise<{stdout:string;stderr:string}>((resolve,reject)=>{execFile(file,args,options,(error,stdout,stderr)=>error?reject(error):resolve({stdout,stderr}));});
 export type WorkerStatus='QUEUED'|'RUNNING'|'COMPLETED'|'FAILED'|'CANCELLED'|'TIMED_OUT'|'BLOCKED_USAGE_LIMIT'|'UNKNOWN';
@@ -58,7 +59,8 @@ export class CodexWorker {
   }
   async stop(){this.closed=true;if(this.timer)clearInterval(this.timer);for(const controller of this.active.values())controller.abort();while(this.active.size)await new Promise(r=>setTimeout(r,20));}
 }
-export function workerServer(worker:CodexWorker){const server=Fastify({logger:false,bodyLimit:160000});
+export function workerServer(worker:CodexWorker,broker?:BrokerTransport){const server=Fastify({logger:false,bodyLimit:160000});
+  if(broker){server.get('/broker/catalog',()=>broker.catalog());server.post('/broker/call',async r=>{const b=z.object({name:z.string().max(100),arguments:z.record(z.string(),z.unknown())}).strict().parse(r.body);return broker.call(b.name,b.arguments);});}
   server.get('/health',()=>worker.health());server.post('/jobs',async r=>worker.enqueue(r.body));server.get('/jobs/:id',async r=>worker.get(z.object({id:z.string().max(100)}).parse(r.params).id));server.post('/jobs/:id/cancel',async r=>worker.cancel(z.object({id:z.string().max(100)}).parse(r.params).id));return server;
 }
 export async function listenWorker(server:ReturnType<typeof workerServer>,socket:string){try{await unlink(socket);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}await server.listen({path:socket});await chmod(socket,0o660);}
