@@ -4,6 +4,7 @@ import type {ProposalService} from './proposals.js';
 import {SLEEVES,sleeveSchema,type TradingBroker} from './model.js';
 import {makeId,nowIso,roundMoney} from '../../core/src/utils.js';
 import {weekKey} from './capital.js';
+import type {IncompleteBrokerObservation} from './worker-broker.js';
 
 type Account=Awaited<ReturnType<TradingBroker['account']>>;
 export const initialAccountImportSchema=z.object({
@@ -39,11 +40,13 @@ export class AccountReconciliationService {
   private token(a:Account){return createHash('sha256').update(JSON.stringify({accountId:a.accountId,cash:a.cash,buyingPower:a.buyingPower,positions:[...a.positions].sort((x,y)=>x.symbol.localeCompare(y.symbol)).map(p=>({symbol:p.symbol,quantity:p.quantity,averageCost:p.averageCost,assetClass:p.assetClass})),internalCash:SLEEVES.map(s=>this.proposals.ledger.getCash(s))})).digest('hex');}
   report(){
     const a=this.db.getSetting<Account|null>('broker_account_v2',null),internal=this.proposals.ledger.aggregatePositions();
+    const observation=this.db.getSetting<IncompleteBrokerObservation|null>('broker_account_observation_v2',null);
+    const observed=a??(observation?.accountId===process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID?observation:null);
     const internalCash=roundMoney(SLEEVES.reduce((n,s)=>n+this.proposals.ledger.getCash(s),0));
     let importBlocked:string|null=null;try{this.guard(a);}catch(e){importBlocked=e instanceof Error?e.message:String(e);}
     return {clear:this.db.getSetting('reconciliation_clear',false),lastRunAt:this.db.getSetting<string|null>('last_reconciliation_at',null),mismatches:this.db.getSetting<string[]>('reconciliation_v2',[]),
-      positions:[...new Set([...internal.map(p=>p.symbol),...(a?.positions??[]).map(p=>p.symbol)])].map(symbol=>({symbol,internal:internal.find(p=>p.symbol===symbol)?.quantity??0,broker:a?.positions.find(p=>p.symbol===symbol)?.quantity??0})),
-      cash:{internal:internalCash,broker:a?.cash??null,buyingPower:a?.buyingPower??null},account:a,
+      positions:[...new Set([...internal.map(p=>p.symbol),...(observed?.positions??[]).map(p=>p.symbol)])].map(symbol=>({symbol,internal:internal.find(p=>p.symbol===symbol)?.quantity??0,broker:observed?.positions.find(p=>p.symbol===symbol)?.quantity??0,averageCost:observed?.positions.find(p=>p.symbol===symbol)?.averageCost??null})),
+      cash:{internal:internalCash,broker:observed?.cash??null,buyingPower:observed?.buyingPower??null},account:observed,snapshotComplete:!!a,
       initialImport:{available:!importBlocked,reason:importBlocked,token:a?this.token(a):null}};
   }
   async importOpeningBalance(input:unknown,actor:string){

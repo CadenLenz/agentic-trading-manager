@@ -5,6 +5,11 @@ import {normalizedAccountSchema} from './mcp-binding.js';
 
 const decimal=z.union([z.number(),z.string().regex(/^-?\d+(\.\d+)?$/)]).transform(Number).pipe(z.number().finite());
 const envelope=z.object({structuredContent:z.object({data:z.record(z.string(),z.unknown())})});
+export interface IncompleteBrokerObservation {accountId:string;cash:number;buyingPower:number;netAccountValue:number;asOf:string;positions:Array<{symbol:string;quantity:number;averageCost:number|null}>}
+export class BrokerBasisUnavailable extends Error {
+  readonly statusCode=409;
+  constructor(readonly observation:IncompleteBrokerObservation,readonly symbols:string[]){super('Robinhood cost basis is not yet available for '+symbols.join(', ')+'. Sync again after Robinhood has populated it. Trading remains blocked.');}
+}
 /** The authenticated official catalog supplies schemas; broker facts never pass through a model. */
 export class WorkerRobinhoodBroker implements TradingBroker {
   readonly deterministic=true;
@@ -13,7 +18,9 @@ export class WorkerRobinhoodBroker implements TradingBroker {
   private async collection(tool:string,key:string,args:Record<string,unknown>){
     const rows:unknown[]=[];const seen=new Set<string>();let cursor:string|undefined;
     for(let page=0;page<100;page++){
-      const data=await this.data(tool,{...args,...(cursor?{cursor}:{})});rows.push(...z.array(z.unknown()).parse(data[key]));
+      const data=await this.data(tool,{...args,...(cursor?{cursor}:{})});
+      if(tool==='get_equity_tax_lots'&&data.symbol!==args.symbol)throw new Error('Broker tax-lot identity mismatch');
+      rows.push(...z.array(z.unknown()).parse(tool==='get_equity_tax_lots'&&data[key]===null?[]:data[key]));
       const next=z.string().nullable().optional().parse(data.next);if(!next)return rows;
       if(seen.has(next))throw new Error('Broker pagination repeated a cursor');seen.add(next);cursor=next;
     }
@@ -37,8 +44,19 @@ export class WorkerRobinhoodBroker implements TradingBroker {
     if(options.length||equityOrders.length||optionOrders.length)throw new Error('Broker options/order history requires a reviewed normalization before complete reconciliation');
     // Closed positions can omit cost basis. Verify quantity before requiring held-position facts.
     const nonzero=z.array(z.object({quantity:decimal}).passthrough()).parse(positions).filter(p=>p.quantity!==0);
-    const holdings=z.array(z.object({symbol:z.string().min(1),quantity:decimal,average_buy_price:decimal,type:z.literal('long')})).parse(nonzero);
+    const holdings=z.array(z.object({symbol:z.string().regex(/^[A-Z][A-Z0-9.-]{0,9}$/),quantity:decimal.pipe(z.number().positive()),average_buy_price:decimal.nullable().optional(),type:z.literal('long')})).parse(nonzero);
     if(new Set(holdings.map(p=>p.symbol)).size!==holdings.length)throw new Error('Duplicate broker position identity');
+    const missing:string[]=[];
+    for(const p of holdings){if(p.average_buy_price!==undefined&&p.average_buy_price!==null)continue;
+      const lots=z.array(z.object({open_lot_id:z.string().min(1),quantity:decimal.pipe(z.number().positive()),cost_per_share:decimal.pipe(z.number().nonnegative()).nullable().optional(),tax_cost_basis:decimal.pipe(z.number().nonnegative()).nullable().optional()})).parse(await this.collection('get_equity_tax_lots','tax_lots',{...args,symbol:p.symbol}));
+      if(new Set(lots.map(l=>l.open_lot_id)).size!==lots.length)throw new Error('Duplicate broker tax-lot identity');
+      const quantity=lots.reduce((n,l)=>n+l.quantity,0);
+      if(!lots.length||Math.abs(quantity-p.quantity)>.000001||lots.some(l=>(l.tax_cost_basis===undefined||l.tax_cost_basis===null)&&(l.cost_per_share===undefined||l.cost_per_share===null))){missing.push(p.symbol);continue;}
+      const basis=lots.reduce((n,l)=>n+(l.tax_cost_basis??l.quantity*l.cost_per_share!),0);
+      if(!Number.isFinite(basis)||basis<0)throw new Error('Invalid broker tax-lot basis');
+      p.average_buy_price=basis/quantity;
+    }
+    if(missing.length)throw new BrokerBasisUnavailable({accountId,cash:decimal.parse(portfolio.cash),buyingPower:decimal.parse(z.object({buying_power:decimal}).parse(portfolio.buying_power).buying_power),netAccountValue:decimal.parse(portfolio.total_value),asOf:new Date(started).toISOString(),positions:holdings.map(p=>({symbol:p.symbol,quantity:p.quantity,averageCost:p.average_buy_price??null}))},missing);
     const prices=new Map<string,number>();
     for(let i=0;i<holdings.length;i+=20){
       const symbols=holdings.slice(i,i+20).map(p=>p.symbol);

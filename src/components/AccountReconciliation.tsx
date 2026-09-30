@@ -6,9 +6,9 @@ const names={SAFE_LONG_TERM:'Safe',AGGRESSIVE_STOCKS:'Aggressive',OPTIONS:'Optio
 type Sleeve=keyof typeof names;
 interface Report {
   clear:boolean;lastRunAt:string|null;mismatches:string[];
-  positions:Array<{symbol:string;internal:number;broker:number}>;
+  positions:Array<{symbol:string;internal:number;broker:number;averageCost:number|null}>;snapshotComplete:boolean;
   cash:{internal:number;broker:number|null;buyingPower:number|null};
-  account:{positions:Array<{symbol:string;quantity:number;averageCost:number}>}|null;
+  account:{positions:Array<{symbol:string;quantity:number;averageCost:number|null}>}|null;
   initialImport:{available:boolean;reason:string|null;token:string|null};
 }
 const money=(n:number|null)=>n===null?'Unverified':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(n);
@@ -17,7 +17,7 @@ export function AccountReconciliation({refresh,notify}:{refresh:()=>Promise<void
   const [assignments,setAssignments]=useState<Record<string,string>>({}),[cash,setCash]=useState<Record<Sleeve,string>>({SAFE_LONG_TERM:'',AGGRESSIVE_STOCKS:'',OPTIONS:''}),[review,setReview]=useState(''),[confirmation,setConfirmation]=useState('');
   const load=async()=>setData(await api<Report>('/api/v2/reconciliation'));
   useEffect(()=>{void load().catch(e=>setError(String(e)));},[]);
-  const sync=async()=>{setBusy(true);setError('');try{await post('/api/v2/reconciliation',{});await Promise.all([load(),refresh()]);}catch(e){setError(e instanceof Error?e.message:String(e));}finally{setBusy(false);}};
+  const sync=async()=>{setBusy(true);setError('');try{await post('/api/v2/reconciliation',{});await Promise.all([load(),refresh()]);}catch(e){setError(e instanceof Error?e.message:String(e));await Promise.all([load(),refresh()]).catch(()=>undefined);}finally{setBusy(false);}};
   const importAccount=async()=>{if(!data)return;setBusy(true);setError('');try{
     const result=await post<{clear:boolean}>('/api/v2/reconciliation/import',{token:data.initialImport.token,confirmation,review,assignments:(data.account?.positions??[]).map(p=>({symbol:p.symbol,strategy:assignments[p.symbol]})),cash:Object.fromEntries(Object.entries(cash).map(([s,n])=>[s,Number(n)]))});
     await Promise.all([load(),refresh()]);notify(result.clear?'Opening balance imported and reconciled. Trading remains paused and read only.':'Opening balance recorded; remaining differences still block trading.',result.clear?'success':'warning');
@@ -30,7 +30,8 @@ export function AccountReconciliation({refresh,notify}:{refresh:()=>Promise<void
     <p className="safety-note">Trading stays paused and read only during this review. Importing records does not buy, sell, or enable trading.</p>
     {error&&<p className="negative" role="alert">{error}</p>}
     <section className="panel product-card"><h3>{data.clear?'No current mismatches':'Critical mismatches'}</h3><p className="muted">Last checked {data.lastRunAt?new Date(data.lastRunAt).toLocaleString():'Not yet checked'}</p>
-      <div className="reconciliation-comparisons">{data.positions.map(p=><article key={p.symbol}><strong>{p.symbol}</strong><dl className="plain-facts"><div><dt>Strategy ledger</dt><dd>{p.internal} shares</dd></div><div><dt>Broker account</dt><dd>{p.broker} shares</dd></div><div><dt>Difference</dt><dd>{p.broker-p.internal} shares</dd></div></dl></article>)}<article><strong>Cash</strong><dl className="plain-facts"><div><dt>Strategy ledger</dt><dd>{money(data.cash.internal)}</dd></div><div><dt>Broker cash</dt><dd>{money(data.cash.broker)}</dd></div><div><dt>Difference</dt><dd>{money(data.cash.broker===null?null:data.cash.broker-data.cash.internal)}</dd></div><div><dt>Broker buying power</dt><dd>{money(data.cash.buyingPower)}</dd></div></dl></article></div>
+      {!data.snapshotComplete&&<p className="safety-note">Broker quantities and cash below are observed facts, but cost basis is incomplete. Opening-balance import remains blocked.</p>}
+      <div className="reconciliation-comparisons">{data.positions.map(p=><article key={p.symbol}><strong>{p.symbol}</strong><dl className="plain-facts"><div><dt>Strategy ledger</dt><dd>{p.internal} shares</dd></div><div><dt>Broker account</dt><dd>{p.broker} shares</dd></div><div><dt>Difference</dt><dd>{p.broker-p.internal} shares</dd></div><div><dt>Broker average cost</dt><dd>{money(p.averageCost)}</dd></div></dl></article>)}<article><strong>Cash</strong><dl className="plain-facts"><div><dt>Strategy ledger</dt><dd>{money(data.cash.internal)}</dd></div><div><dt>Broker cash</dt><dd>{money(data.cash.broker)}</dd></div><div><dt>Difference</dt><dd>{money(data.cash.broker===null?null:data.cash.broker-data.cash.internal)}</dd></div><div><dt>Broker buying power</dt><dd>{money(data.cash.buyingPower)}</dd></div></dl></article></div>
       {data.mismatches.length>0&&<ul>{data.mismatches.map(m=><li key={m}>{m}</li>)}</ul>}
     </section>
     {!data.clear&&<section className="panel product-card"><h3>Import your opening account balance</h3><p>This one-time review replaces the unused setup cash and records holdings you already own. Broker cost basis is preserved. Each strategy starts from its imported value, so setup money is not counted as a trading loss.</p>

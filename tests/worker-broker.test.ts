@@ -1,5 +1,5 @@
 import {afterEach,describe,expect,it,vi} from 'vitest';
-import {WorkerRobinhoodBroker} from '../packages/trading-v2/src/worker-broker.js';
+import {WorkerRobinhoodBroker,BrokerBasisUnavailable} from '../packages/trading-v2/src/worker-broker.js';
 import {CodexMcpTransport,DETERMINISTIC_BROKER_TOOLS} from '../packages/agents/src/codex-mcp.js';
 import type {OfficialRobinhoodConnection} from '../packages/trading-v2/src/connectors.js';
 
@@ -11,6 +11,14 @@ function fixture(overrides:Record<string,unknown>={}){
   return {broker:new WorkerRobinhoodBroker(connection as unknown as OfficialRobinhoodConnection),connection,values};
 }
 describe('deterministic worker broker',()=>{
+  it('uses complete scoped tax lots for omitted basis and refuses incomplete or wrong-identity lots',async()=>{
+    const {broker,values}=fixture({get_equity_positions:{positions:[{symbol:'TEST',quantity:'1',type:'long'}]},get_equity_tax_lots:{symbol:'TEST',tax_lots:[{open_lot_id:'lot-a',quantity:'0.4',tax_cost_basis:'120'},{open_lot_id:'lot-b',quantity:'0.6',cost_per_share:'300'}]}});
+    expect((await broker.account()).positions[0]?.averageCost).toBe(300);
+    values.get_equity_tax_lots={symbol:'TEST',tax_lots:[]};await expect(broker.account()).rejects.toBeInstanceOf(BrokerBasisUnavailable);
+    values.get_equity_tax_lots={symbol:'OTHER',tax_lots:[]};await expect(broker.account()).rejects.toThrow('identity');
+    values.get_equity_tax_lots={symbol:'TEST',tax_lots:[{open_lot_id:'a',quantity:'0.5',cost_per_share:'300'}]};await expect(broker.account()).rejects.toBeInstanceOf(BrokerBasisUnavailable);
+    values.get_equity_tax_lots={symbol:'TEST',tax_lots:[{open_lot_id:'a',quantity:'1'}]};await expect(broker.account()).rejects.toBeInstanceOf(BrokerBasisUnavailable);
+  });
   it('normalizes actual decimals and scoped holdings without a model or ownership assignment',async()=>{const {broker,connection}=fixture();const a=await broker.account();expect(a).toMatchObject({cash:500,netAccountValue:900,complete:true,positions:[{symbol:'TEST',quantity:1,price:400,averageCost:300}]});expect(connection.validateAccount).toHaveBeenCalledWith('test-scoped-account');expect(connection.call.mock.calls.every(([name])=>name.startsWith('get_'))).toBe(true);});
   it('ignores verified zero-share rows with missing basis but rejects missing facts for held shares',async()=>{
     const {broker,values}=fixture({get_equity_positions:{positions:[{symbol:'TEST',quantity:'1',average_buy_price:'300',type:'long'},{symbol:'CLOSED',quantity:'0'},{symbol:'CLOSED2',quantity:0,average_buy_price:null}]}});

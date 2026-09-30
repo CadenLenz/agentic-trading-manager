@@ -4,6 +4,7 @@ import {ProposalService} from '../packages/trading-v2/src/proposals.js';
 import {AccountReconciliationService} from '../packages/trading-v2/src/account-reconciliation.js';
 import {SLEEVES,type TradingAccount,type TradingBroker} from '../packages/trading-v2/src/model.js';
 import {nowIso} from '../packages/core/src/utils.js';
+import {BrokerBasisUnavailable} from '../packages/trading-v2/src/worker-broker.js';
 
 let manager:AgenticManager;
 afterEach(async()=>{await manager?.shutdown();vi.unstubAllEnvs();});
@@ -20,6 +21,14 @@ async function fixture(){
   return {account,broker,forbidden,proposals,service,request};
 }
 describe('Reviewed initial broker account import',()=>{
+  it('shows incomplete broker holdings and cash with a specific basis blocker and cannot clear or import them',async()=>{
+    const {service,proposals,broker,request}=await fixture();const input=request();
+    Object.assign(broker,{account:async()=>{throw new BrokerBasisUnavailable({accountId:'fixture-account',cash:500.53,buyingPower:500.53,netAccountValue:940.53,asOf:nowIso(),positions:[{symbol:'TSLA',quantity:1,averageCost:null}]},['TSLA']);}});
+    await expect(proposals.reconcile()).rejects.toThrow('cost basis');
+    expect(service.report()).toMatchObject({clear:false,snapshotComplete:false,cash:{broker:500.53},positions:[{symbol:'TSLA',broker:1,averageCost:null}],initialImport:{available:false}});
+    expect(manager.database.getSetting('broker_account_v2')).toBeNull();
+    await expect(service.importOpeningBalance(input,'operator')).rejects.toThrow('cost basis');expect(manager.ledger.aggregatePositions()).toHaveLength(0);
+  });
   it('reports actual mismatches and imports holdings and cash atomically without orders or risk-policy changes',async()=>{
     const {service,request,forbidden}=await fixture(),before=SLEEVES.map(s=>manager.allocation.policy(s));
     expect(service.report()).toMatchObject({clear:false,cash:{internal:50000,broker:500.53},initialImport:{available:true}});

@@ -6,6 +6,7 @@ import { StrategyAllocationManager } from './capital.js';
 import {RiskConfigurationService} from './configuration.js';
 import {PREPRODUCTION_LIVE_LOCK} from './readiness.js';
 import {pacificPeriodStart} from './periods.js';
+import {BrokerBasisUnavailable} from './worker-broker.js';
 import { DEFAULT_ACCOUNT_POLICY, accountPolicySchema, proposalSchema, researchSchema, RESEARCH_REQUIRED, SLEEVES, type Proposal, type ProposalState, type TradingBroker, type ExecutableOrder, type BrokerFill, type AgentMode } from './model.js';
 
 interface Row {id:string;version:number;state:ProposalState;body_json:string;research_json:string|null;preview_json:string|null;preview_hash:string|null;approval_json:string|null;order_id:string|null}
@@ -391,9 +392,17 @@ export class ProposalService {
       for(const o of account.orders)if(!this.db.raw.prepare('SELECT id FROM executions_v2 WHERE broker_order_id=?').get(o.id))mismatches.push('Unattributed broker order '+o.id);
     }
     this.db.setSetting('reconciliation_clear',mismatches.length===0);this.db.setSetting('last_reconciliation_at',nowIso());this.db.setSetting('broker_account_v2',account);this.db.setSetting('reconciliation_v2',mismatches);
+    this.db.setSetting('broker_account_observation_v2',null);
     this.db.setSetting('broker_verification_mode_v2',this.db.getMode());
     if(mismatches.length)this.db.setSetting('global_pause',true);
     this.db.audit('RECONCILIATION','V2_RECONCILIATION','account',account.accountId,{mismatches});this.onEvent(mismatches.length?'RECONCILIATION_FAILURE':'RECONCILED',{accountId:account.accountId,mismatches});return {clear:mismatches.length===0,mismatches,account};
-    }catch(error){this.db.setSetting('reconciliation_clear',false);this.db.setSetting('global_pause',true);this.db.setSetting('reconciliation_v2',['Broker verification/reconciliation failed']);this.db.audit('RECONCILIATION','V2_RECONCILIATION_FAILED','system',null,{reason:error instanceof Error?error.message:'Invalid broker state'});throw error;}
+    }catch(error){this.db.setSetting('reconciliation_clear',false);this.db.setSetting('global_pause',true);
+      if(error instanceof BrokerBasisUnavailable){
+        const a=error.observation,internal=this.ledger.aggregatePositions(),cash=SLEEVES.reduce((n,s)=>n+this.ledger.getCash(s),0);
+        const differences=[error.message,...[...new Set([...internal.map(p=>p.symbol),...a.positions.map(p=>p.symbol)])].filter(symbol=>Math.abs((a.positions.find(p=>p.symbol===symbol)?.quantity??0)-(internal.find(p=>p.symbol===symbol)?.quantity??0))>.000001).map(symbol=>'Equity ownership mismatch: '+symbol)];
+        if(Math.abs(cash-a.cash)>.01||a.buyingPower<0)differences.push('Cash/buying-power mismatch');
+        this.db.setSetting('broker_account_v2',null);this.db.setSetting('broker_account_observation_v2',a);this.db.setSetting('last_reconciliation_at',nowIso());this.db.setSetting('reconciliation_v2',differences);
+      }else this.db.setSetting('reconciliation_v2',['Broker verification/reconciliation failed']);
+      this.db.audit('RECONCILIATION','V2_RECONCILIATION_FAILED','system',null,{reason:error instanceof Error?error.message:'Invalid broker state'});throw error;}
   }
 }
