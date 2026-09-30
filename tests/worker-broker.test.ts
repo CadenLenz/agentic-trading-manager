@@ -12,6 +12,12 @@ function fixture(overrides:Record<string,unknown>={}){
 }
 describe('deterministic worker broker',()=>{
   it('normalizes actual decimals and scoped holdings without a model or ownership assignment',async()=>{const {broker,connection}=fixture();const a=await broker.account();expect(a).toMatchObject({cash:500,netAccountValue:900,complete:true,positions:[{symbol:'TEST',quantity:1,price:400,averageCost:300}]});expect(connection.validateAccount).toHaveBeenCalledWith('test-scoped-account');expect(connection.call.mock.calls.every(([name])=>name.startsWith('get_'))).toBe(true);});
+  it('ignores verified zero-share rows with missing basis but rejects missing facts for held shares',async()=>{
+    const {broker,values}=fixture({get_equity_positions:{positions:[{symbol:'TEST',quantity:'1',average_buy_price:'300',type:'long'},{symbol:'CLOSED',quantity:'0'},{symbol:'CLOSED2',quantity:0,average_buy_price:null}]}});
+    expect((await broker.account()).positions).toHaveLength(1);
+    values.get_equity_positions={positions:[{symbol:'TEST',quantity:'1',type:'long'}]};await expect(broker.account()).rejects.toThrow();
+    values.get_equity_positions={positions:[{symbol:'UNKNOWN'}]};await expect(broker.account()).rejects.toThrow();
+  });
   it('rejects unauthorized identity rather than choosing another account',async()=>{const {broker}=fixture({get_accounts:{accounts:[]}});await expect(broker.account()).rejects.toThrow('authorized Agentic');});
   it('fails closed for unsupported collateral or executions',async()=>{const {broker}=fixture({get_option_orders:{orders:[{id:'unknown'}]}});await expect(broker.account()).rejects.toThrow('reviewed normalization');});
   it('rejects missing facts and wrong quote identity',async()=>{const {broker}=fixture({get_equity_quotes:{results:[]}});await expect(broker.account()).rejects.toThrow();});

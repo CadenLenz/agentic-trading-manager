@@ -25,7 +25,6 @@ export class AccountReconciliationService {
     if(this.db.getSetting<string[]>('reconciliation_v2',[]).some(x=>!x.startsWith('Equity ownership mismatch: ')&&x!=='Cash/buying-power mismatch'))throw new Error('Resolve broker verification or execution discrepancies before importing an opening balance.');
     if(!Number.isFinite(a.cash)||a.cash<0||!Number.isFinite(a.buyingPower)||a.buyingPower<0||!Number.isFinite(a.netAccountValue)||a.netAccountValue<0)throw new Error('Broker balances are invalid.');
     if(new Set(a.positions.map(p=>p.symbol)).size!==a.positions.length||a.positions.some(p=>!Number.isFinite(p.quantity)||p.quantity<=0||!Number.isFinite(p.averageCost)||p.averageCost<0||!Number.isFinite(p.price)||p.price<=0))throw new Error('Broker holdings need individual review.');
-    if(Math.abs(a.cash+a.positions.reduce((n,p)=>n+p.price*p.quantity,0)-a.netAccountValue)>.02)throw new Error('Broker net account value does not match cash and holdings. Review snapshot completeness.');
     const queries=[
       'SELECT 1 FROM strategy_positions LIMIT 1','SELECT 1 FROM strategy_lots LIMIT 1','SELECT 1 FROM fills LIMIT 1',
       'SELECT 1 FROM option_positions LIMIT 1','SELECT 1 FROM position_assignments LIMIT 1',

@@ -35,7 +35,9 @@ export class WorkerRobinhoodBroker implements TradingBroker {
     const equityOrders=await this.collection('get_equity_orders','orders',args),optionOrders=await this.collection('get_option_orders','orders',args);
     // Never silently discard executions/collateral we cannot yet normalize and reconcile.
     if(options.length||equityOrders.length||optionOrders.length)throw new Error('Broker options/order history requires a reviewed normalization before complete reconciliation');
-    const holdings=z.array(z.object({symbol:z.string().min(1),quantity:decimal,average_buy_price:decimal,type:z.literal('long')})).parse(positions).filter(p=>p.quantity!==0);
+    // Closed positions can omit cost basis. Verify quantity before requiring held-position facts.
+    const nonzero=z.array(z.object({quantity:decimal}).passthrough()).parse(positions).filter(p=>p.quantity!==0);
+    const holdings=z.array(z.object({symbol:z.string().min(1),quantity:decimal,average_buy_price:decimal,type:z.literal('long')})).parse(nonzero);
     if(new Set(holdings.map(p=>p.symbol)).size!==holdings.length)throw new Error('Duplicate broker position identity');
     const prices=new Map<string,number>();
     for(let i=0;i<holdings.length;i+=20){
