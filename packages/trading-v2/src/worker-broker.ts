@@ -3,6 +3,7 @@ import type {OfficialRobinhoodConnection} from './connectors.js';
 import type {TradingBroker,TradingAccount,ProposalInput,ExecutableOrder} from './model.js';
 import {normalizeOfficialOrder,officialOrderArguments,brokerReference} from './official-orders.js';
 import {normalizedAccountSchema} from './mcp-binding.js';
+import {listedCommonStock} from './listed-security.js';
 
 const decimal=z.union([z.number(),z.string().regex(/^-?\d+(\.\d+)?$/)]).transform(Number).pipe(z.number().finite());
 const envelope=z.object({structuredContent:z.object({data:z.record(z.string(),z.unknown())})});
@@ -50,14 +51,29 @@ export class WorkerRobinhoodBroker implements TradingBroker {
       const p=z.object({option_id:z.string(),quantity:decimal,type:z.enum(['long','short']),average_price:decimal,trade_value_multiplier:decimal,pending_exercise_quantity:decimal,pending_assignment_quantity:decimal,pending_expiration_quantity:decimal}).parse(input);
       if(p.quantity===0)continue;
       if(p.quantity<0||p.trade_value_multiplier!==100||p.pending_exercise_quantity!==0||p.pending_assignment_quantity!==0||p.pending_expiration_quantity!==0)throw new Error('Option lifecycle event or adjusted contract requires verified-event review');
-      const i=await this.optionInstrument(p.option_id),q=z.array(z.object({quote:z.object({instrument_id:z.string(),mark_price:decimal})})).length(1).parse((await this.data('get_option_quotes',{instrument_ids:[p.option_id]})).results)[0]!.quote;
+      const i=await this.optionInstrument(p.option_id),q=z.array(z.object({quote:z.object({instrument_id:z.string(),mark_price:decimal}).passthrough()})).length(1).parse((await this.data('get_option_quotes',{instrument_ids:[p.option_id]})).results)[0]!.quote;
       if(q.instrument_id!==p.option_id)throw new Error('Option quote identity mismatch');
+      const underlying=z.array(z.object({quote:z.object({symbol:z.string(),last_trade_price:decimal})})).length(1).parse((await this.data('get_equity_quotes',{symbols:[i.underlying]})).results)[0]!.quote;
+      if(underlying.symbol!==i.underlying)throw new Error('Monitored underlying identity mismatch');
+      const bid=Number(q.bid_price),ask=Number(q.ask_price),mid=(bid+ask)/2;
+      const monitor:Record<string,number|string>={underlyingPrice:underlying.last_trade_price,at:new Date().toISOString()};
+      if(Number.isFinite(mid)&&mid>0&&ask>=bid)monitor.spreadPercent=100*(ask-bid)/mid;
+      for(const [field,key] of [['delta','delta'],['implied_volatility','iv'],['theta','theta'],['vega','vega'],['gamma','gamma']] as const)if(q[field]!==null&&q[field]!==undefined&&Number.isFinite(Number(q[field])))monitor[key]=Number(q[field]);
+      this.connection.db.setSetting('option_monitor:'+p.option_id,monitor);
       normalizedOptions.push({optionId:p.option_id,contracts:p.quantity*(p.type==='short'?-1:1),averagePremium:Math.abs(p.average_price)/100,price:q.mark_price,collateral:p.type==='short'&&i.type==='PUT'?p.quantity*i.strike*100:0});
     }
     // Closed positions can omit cost basis. Verify quantity before requiring held-position facts.
     const nonzero=z.array(z.object({quantity:decimal}).passthrough()).parse(positions).filter(p=>p.quantity!==0);
     const holdings=z.array(z.object({symbol:z.string().regex(/^[A-Z][A-Z0-9.-]{0,9}$/),quantity:decimal.pipe(z.number().positive()),average_buy_price:decimal.nullable().optional(),type:z.literal('long')})).parse(nonzero);
     if(new Set(holdings.map(p=>p.symbol)).size!==holdings.length)throw new Error('Duplicate broker position identity');
+    const sectors=this.connection.db.getSetting<Record<string,string>>('verified_sectors_v2',{});
+    const sectorDate=new Date().toISOString().slice(0,10);
+    if(holdings.length&&(this.connection.db.getSetting('verified_sectors_date','')!==sectorDate||holdings.some(p=>!sectors[p.symbol]))){
+      const rows=z.array(z.object({symbol:z.string(),sector:z.string().min(1)})).parse((await this.data('get_equity_fundamentals',{symbols:holdings.map(p=>p.symbol),bounds:'regular'})).results);
+      if(holdings.some(p=>rows.filter(r=>r.symbol===p.symbol).length!==1))throw new Error('Held-position sector metadata incomplete');
+      for(const row of rows)sectors[row.symbol]=row.sector;
+      this.connection.db.setSetting('verified_sectors_v2',sectors);this.connection.db.setSetting('verified_sectors_date',sectorDate);
+    }
 
     for(const p of holdings){if(p.average_buy_price!==undefined&&p.average_buy_price!==null)continue;
       const lots=z.array(z.object({open_lot_id:z.string().min(1),quantity:decimal.pipe(z.number().positive()),cost_per_share:decimal.pipe(z.number().nonnegative()).nullable().optional(),tax_cost_basis:decimal.pipe(z.number().nonnegative()).nullable().optional()})).parse(await this.collection('get_equity_tax_lots','tax_lots',{...args,symbol:p.symbol}));
@@ -91,7 +107,9 @@ export class WorkerRobinhoodBroker implements TradingBroker {
     const fundamentals=z.array(z.object({symbol:z.string(),volume:decimal.nullable(),average_volume_2_weeks:decimal.nullable(),market_cap:decimal.nullable(),pe_ratio:decimal.nullable(),sector:z.string()})).length(1).parse((await this.data('get_equity_fundamentals',{symbols:[symbol],bounds:'regular'})).results)[0]!;
     const tradability=z.array(z.object({symbol:z.string(),tradeable:z.boolean(),country:z.string().optional(),fractional_tradability:z.string().optional(),internal_halt_reason:z.string().optional()})).length(1).parse((await this.data('get_equity_tradability',{account_number:process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID,symbols:[symbol]})).results)[0]!;
     if(raw.symbol!==symbol||fundamentals.symbol!==symbol||tradability.symbol!==symbol)throw new Error('Quote/fundamentals/tradability identity mismatch');
-    const classification=this.connection.db.getSetting<Record<string,{assetClass:'EQUITY'|'ETF';usListed:boolean;leveraged:boolean}>>('verified_instruments_v2',{})[symbol];
+    let classification=this.connection.db.getSetting<Record<string,{assetClass:'EQUITY'|'ETF';usListed:boolean;leveraged:boolean}>>('verified_instruments_v2',{})[symbol];
+    if(!classification&&await listedCommonStock(this.connection.db,symbol))classification={assetClass:'EQUITY',usListed:true,leveraged:false};
+    const sectors=this.connection.db.getSetting<Record<string,string>>('verified_sectors_v2',{});sectors[symbol]=fundamentals.sector;this.connection.db.setSetting('verified_sectors_v2',sectors);
     const common={symbol:p.symbol,price:raw.last_trade_price,bid:raw.bid_price,ask:raw.ask_price,volume:fundamentals.volume??0,asOf:new Date(Math.min(Date.parse(raw.venue_bid_time),Date.parse(raw.venue_ask_time))).toISOString(),tradingEligible:raw.state==='active'&&raw.has_traded&&tradability.tradeable&&!tradability.internal_halt_reason&&(Number.isInteger(p.quantity)||tradability.fractional_tradability==='tradable'),usListed:classification?.usListed===true,leveraged:classification?.leveraged!==false,assetClass:p.option?'OPTION' as const:classification?.assetClass,sector:fundamentals.sector,provenance:'OFFICIAL_MCP_REVIEWED_BINDING',...(fundamentals.market_cap!==null?{marketCap:fundamentals.market_cap}:{}),...(fundamentals.pe_ratio!==null?{valuationPE:fundamentals.pe_ratio}:{}),...(fundamentals.volume!==null&&fundamentals.average_volume_2_weeks!==null&&fundamentals.average_volume_2_weeks>0?{relativeVolume:fundamentals.volume/fundamentals.average_volume_2_weeks}:{})};
     const horizon=p.holdingTradingDays===null?null:Math.ceil(p.holdingTradingDays*7/5)+3;
     if(horizon!==null&&horizon<=31){const events=z.array(z.object({symbol:z.string(),report:z.object({date:z.string().nullable(),verified:z.boolean()}).nullable()})).parse((await this.data('get_earnings_calendar',{start_date:new Date().toISOString().slice(0,10),days:Math.max(1,horizon)})).results);Object.assign(common,{earningsWithinHolding:events.some(e=>e.symbol===symbol)});}

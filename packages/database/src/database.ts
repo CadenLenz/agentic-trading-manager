@@ -5,6 +5,7 @@ import { EXAMPLE_GLOBAL_RISK, EXAMPLE_STRATEGY_CONFIGS, STRATEGY_IDS, type Agent
 import { diffRecords, makeId, nowIso, parseJson, redact,roundMoney } from '../../core/src/utils.js';
 import { migrateOwnership, V2_SQL } from './v2-migration.js';
 import {migrateExternalBasis} from './manual-live-migration.js';
+import {migrateAutonomyAccounting} from './autonomy-migration.js';
 import { PREPRODUCTION_SQL } from './preproduction-migration.js';
 import { DEFAULT_POLICIES, SLEEVES } from '../../trading-v2/src/model.js';
 
@@ -315,6 +316,7 @@ export const MIGRATIONS: Array<{ version: number; sql: string; run?: (db: Databa
   { version: 3, sql: V2_SQL, run: migrateOwnership },
   { version: 4, sql: PREPRODUCTION_SQL },
   {version:5,sql:"",run:migrateExternalBasis},
+  {version:6,sql:"",run:migrateAutonomyAccounting},
 ];
 
 interface StrategyRow {

@@ -8,6 +8,8 @@ import {SimulationTradingBroker} from '../packages/trading-v2/src/broker.js';
 import {ProposalService} from '../packages/trading-v2/src/proposals.js';
 import {buy} from './helpers.js';
 import {prepareEmergencyCloses} from '../packages/trading-v2/src/emergency.js';
+import {autonomousAuthorized,revokeAutonomy} from '../packages/trading-v2/src/autonomy.js';
+import {enforceSafeStartup} from '../packages/trading-v2/src/safe-startup.js';
 const cleanup:Array<()=>Promise<void>>=[];
 beforeEach(()=>{vi.stubEnv('OPENAI_API_KEY','');vi.stubEnv('ENABLE_SMS_DELIVERY','false');});
 afterEach(async()=>{while(cleanup.length)await cleanup.pop()?.();vi.unstubAllEnvs();});
@@ -21,11 +23,28 @@ function option(m:AgenticManager,strategy:'LONG_CALL'|'LONG_PUT'|'COVERED_CALL'|
   return {...exampleProposal(),strategy:'OPTIONS',assetClass:'OPTION',symbol:'TEST',underlying:'TEST',side:strategy.startsWith('LONG')?'BUY':'SELL',limitPrice:strategy.startsWith('LONG')?1.03:0.97,option:{optionId,type,strike:10,expiration,contracts:1,strategy,maxLoss:0,collateralRequired:0,estimatedPremium:999999}};
 }
 describe('V2 deterministic foundation',()=>{
+  it('autonomous LIVE executes mocked equity and Level-2 options without approval, previews first, persists safe restart and revokes STOP',async()=>{
+    const m=await fixture(),sim=new SimulationTradingBroker(m.database,m.ledger,m.market),calls:string[]=[];
+    let pending:{order:ExecutableOrder;id:string;fills:import('../packages/trading-v2/src/model.js').BrokerFill[]}|null=null;
+    vi.stubEnv('ROBINHOOD_AGENTIC_ACCOUNT_ID','live-fixture');
+    const broker:TradingBroker={deterministic:true,account:async()=>{const a={...await sim.account(),accountId:'live-fixture'};
+      if(pending&&!m.database.raw.prepare('SELECT id FROM fills WHERE broker_fill_id=?').get(pending.fills[0]!.id)){
+        const fill=pending.fills[0]!,o=pending.order;return {...a,cash:a.cash-fill.quantity*fill.price*100-.03,netAccountValue:a.netAccountValue-.03,orders:[{id:pending.id,clientOrderId:o.clientOrderId,status:'FILLED',filledQuantity:fill.quantity}],fills:pending.fills,options:[{optionId:o.option!.optionId,contracts:fill.quantity,averagePremium:fill.price,price:fill.price,collateral:0}]};
+      }return a;},quote:async p=>({...await sim.quote(p),tradingEligible:true,usListed:true,leveraged:false,assetClass:p.assetClass,sector:'Technology',earningsWithinHolding:false}),preview:async o=>{calls.push('preview');const preview=await sim.preview(o);return o.option?{...preview,estimatedCost:preview.estimatedCost+.03,raw:{fees:{total_fee:'0.03'}}}:preview;},place:async o=>{calls.push('place');const result=await sim.place(o);if(o.option){const fills=result.fills.map(f=>({...f,fees:null}));pending={order:o,id:result.id,fills};return {...result,fills};}return result;},cancel:id=>sim.cancel(id)};
+    const service=new ProposalService(m.database,m.ledger,m.allocation,()=>broker);
+    m.database.raw.prepare('INSERT OR REPLACE INTO market_sessions VALUES(?,?,?,?,?)').run(new Date().toISOString().slice(0,10),new Date(Date.now()-60000).toISOString(),new Date(Date.now()+3600000).toISOString(),'isolated-fixture',nowIso());
+    m.database.setSetting('operating_mode','AUTONOMOUS_LIVE');m.database.setSetting('autonomous_authorization_v1',{id:'operator-on',accountId:'live-fixture',actor:'operator',at:nowIso(),review:'Reviewed actual scoped account and risk'});m.database.setSetting('v2_live_activation',true);m.database.setSetting('live_db_confirmation',true);
+    for(const strategy of ['AGGRESSIVE_STOCKS','OPTIONS'] as const){const policy=m.allocation.policy(strategy);policy.executionPolicy='AUTONOMOUS_RISK_APPROVED';m.allocation.updatePolicy(strategy,policy,'operator');}
+    for(const input of [exampleProposal(),option(m)]){const p=service.create(input,'autonomous');service.research(p.id,{...research(p.strategy),simulated:false},'autonomous');await service.review(p.id,'autonomous');expect((await service.risk(p.id)).checks.filter(c=>!c.ok)).toEqual([]);expect(service.get(p.id).state).toBe('READY_TO_EXECUTE');expect(service.detail(p.id).approval).toBeNull();await service.execute(p.id,'autonomous','AUTONOMOUS');if(input.option){expect(service.get(p.id).state).toBe('BROKER_ACCEPTED');expect((await service.reconcile()).clear).toBe(true);expect(m.database.getSetting<Record<string,{source:string}>>('verified_fill_fees_v2')[pending!.fills[0]!.id]?.source).toBe('OBSERVED_ACCOUNT_CASH_CHARGE');}expect(service.get(p.id).state).toBe('FILLED');await service.execute(p.id,'autonomous','AUTONOMOUS');}
+    expect(calls).toEqual(['preview','place','preview','place']);
+    expect(autonomousAuthorized(m.database,'OPTIONS')).toBe(true);enforceSafeStartup(m.database);expect(m.database.getMode()).toBe('AUTONOMOUS_LIVE');expect(autonomousAuthorized(m.database,'OPTIONS')).toBe(false);await service.reconcile();expect(autonomousAuthorized(m.database,'OPTIONS')).toBe(true);
+    m.database.setSetting('stopped',true);revokeAutonomy(m.database,'STOP');expect(m.database.getMode()).toBe('READ_ONLY');expect(autonomousAuthorized(m.database,'OPTIONS')).toBe(false);
+  });
   it('manual LIVE rechecks real research, approval, fresh broker facts and blocks all agent submission',async()=>{
     const m=await fixture(),sim=new SimulationTradingBroker(m.database,m.ledger,m.market);
     vi.stubEnv('ROBINHOOD_AGENTIC_ACCOUNT_ID','live-fixture');
     const place=vi.fn((o:ExecutableOrder)=>sim.place(o));
-    const broker:TradingBroker={deterministic:true,account:async()=>({...await sim.account(),accountId:'live-fixture'}),quote:async p=>({...await sim.quote(p),tradingEligible:true,usListed:true,leveraged:false,assetClass:p.assetClass,earningsWithinHolding:false}),preview:o=>sim.preview(o),place,cancel:id=>sim.cancel(id)};
+    const broker:TradingBroker={deterministic:true,account:async()=>({...await sim.account(),accountId:'live-fixture'}),quote:async p=>({...await sim.quote(p),tradingEligible:true,usListed:true,leveraged:false,assetClass:p.assetClass,sector:'Technology',earningsWithinHolding:false}),preview:o=>sim.preview(o),place,cancel:id=>sim.cancel(id)};
     const service=new ProposalService(m.database,m.ledger,m.allocation,()=>broker);
     m.database.raw.prepare('INSERT OR REPLACE INTO market_sessions VALUES(?,?,?,?,?)').run(new Date().toISOString().slice(0,10),new Date(Date.now()-60000).toISOString(),new Date(Date.now()+3600000).toISOString(),'isolated-fixture',nowIso());
     m.database.setSetting('operating_mode','LIVE');m.database.setSetting('v2_live_activation',true);m.database.setSetting('live_db_confirmation',true);

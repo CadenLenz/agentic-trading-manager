@@ -65,6 +65,7 @@ export class WatcherEngine extends EventEmitter {
   }
   stop(): void { if (this.timer) clearInterval(this.timer); this.timer = null; }
   async poll(): Promise<WatcherEvent[]> {
+    if(this.database.getMode()!=='SIMULATION'&&!this.provider.tradingEligible)return [];
     const symbols = new Set(this.ledger.listPositions().map((position) => position.symbol));
     for (const row of this.database.raw.prepare('SELECT symbol FROM watchlists').all() as Array<{ symbol: string }>) symbols.add(row.symbol);
     if (!symbols.size) ['NVDA', 'RKLB', 'SPY'].forEach((symbol) => symbols.add(symbol));

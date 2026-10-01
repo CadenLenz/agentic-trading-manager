@@ -1,9 +1,13 @@
 import {CodexTaskService} from '../../agents/src/task-service.js';
+import {createAutonomousSupervisor} from '../../trading-v2/src/autonomous-runtime.js';
+import type {AutonomousSupervisor} from '../../trading-v2/src/autonomous-supervisor.js';
+import {revokeAutonomy,liveMode} from '../../trading-v2/src/autonomy.js';
+import {refreshCommissioning} from '../../trading-v2/src/automatic-commissioning.js';
 import { existsSync } from 'node:fs';
 import { join,dirname } from 'node:path';
 import {tmpdir} from 'node:os';
 import type { HealthReport, TradeProposal } from './types.js';
-import { nowIso,makeId } from './utils.js';
+import { nowIso,makeId,stableHash } from './utils.js';
 import { EventBus } from './event-bus.js';
 import { openDatabase, type AppDatabase } from '../../database/src/database.js';
 import { VirtualPortfolioLedger } from '../../ledger/src/virtual-ledger.js';
@@ -52,6 +56,7 @@ export class AgenticManager {
   readonly simulation: SimulationBroker;
   readonly codex: CodexRunner;
   readonly codexTasks: CodexTaskService;
+  readonly autonomousSupervisor:AutonomousSupervisor;
   readonly robinhood: RobinhoodMcpAdapter;
   readonly execution: ExecutionEngine;
   readonly reconciliation: ReconciliationEngine;
@@ -98,6 +103,7 @@ export class AgenticManager {
     this.allocation = new StrategyAllocationManager(this.database,this.ledger);
     const dataDirectory=options.databasePath===':memory:'?join(tmpdir(),makeId('atm-test-manager')):dirname(options.databasePath);
     this.riskConfiguration=new RiskConfigurationService(this.database);this.analytics=new PortfolioAnalytics(this.database,this.ledger,this.allocation);
+    for(const [s,objective,risk] of [['SAFE_LONG_TERM','LONG_TERM_QUALITY',20],['AGGRESSIVE_STOCKS','SWING_MOMENTUM',25],['OPTIONS','ACTIVE_LEVEL2_OPTIONS',5]] as const)if(!this.database.getSetting('strategy_behavior:'+s,null))this.database.setSetting('strategy_behavior:'+s,{objective,allowedSymbols:[],maxPortfolioRiskPercent:risk,manageExistingFirst:true});
     this.notifications=new NotificationService(this.database);this.connectors=new ConnectorService(this.database,join(dataDirectory,'connectors'),options.sessionSecret);
     this.operationalMonitor=new OperationalNotificationMonitor(this.database,this.notifications,()=>this.health(),()=>this.connectors.list().find(c=>c.id==='ROBINHOOD')!);
     this.fullSimulation=new FullSystemSimulation(this.database,join(dataDirectory,'simulations'),event=>{this.events.publish({type:'SIMULATION_EVENT',severity:'INFO',source:'SIMULATION',payload:{...event}});});
@@ -110,16 +116,18 @@ export class AgenticManager {
     this.proposals.onQuote=(p,q)=>{if(p.option)this.analytics.recordOption(p.option.optionId,q);};
     this.proposals.onEvent=(kind,detail)=>{try{this.events.publish({type:kind,severity:kind==='RECONCILIATION_FAILURE'?'CRITICAL':'INFO',source:'V2',payload:detail});
       if(kind==='PROPOSAL_TRANSITION'){const p=this.proposals.get(String(detail.id)),state=String(detail.to);if(['FILLED','PARTIALLY_FILLED'].includes(state))this.analytics.snapshot('FILL');
-        const event=state==='PARTIALLY_FILLED'?'PARTIAL_FILL':state==='REJECTED'?'REJECTED':['RECONCILIATION_REQUIRED','UNKNOWN_OUTCOME'].includes(state)?'RECONCILIATION_FAILURE':state==='FILLED'?(p.option?'OPTION_'+(p.positionEffect==='OPEN'?'OPENED':'CLOSED'):p.strategy==='AGGRESSIVE_STOCKS'?'AGGRESSIVE_'+(p.positionEffect==='OPEN'?'OPENED':'CLOSED'):'SAFE_TRADE'):null;
+        const event=state==='BROKER_ACCEPTED'?'TRADE_SUBMITTED':state==='PARTIALLY_FILLED'?'PARTIAL_FILL':state==='REJECTED'?'REJECTED':['RECONCILIATION_REQUIRED','UNKNOWN_OUTCOME'].includes(state)?'RECONCILIATION_FAILURE':state==='FILLED'?(p.option?'OPTION_'+(p.positionEffect==='OPEN'?'OPENED':'CLOSED'):p.strategy==='AGGRESSIVE_STOCKS'?'AGGRESSIVE_'+(p.positionEffect==='OPEN'?'OPENED':'CLOSED'):'SAFE_TRADE'):null;
         if(event)this.notifications.emit(p.id+':'+state+':'+String(this.database.raw.prepare('SELECT COUNT(*) AS n FROM fills').get()&&(this.database.raw.prepare('SELECT COUNT(*) AS n FROM fills').get() as {n:number}).n),event,['RECONCILIATION_REQUIRED','UNKNOWN_OUTCOME'].includes(state)?'CRITICAL':'INFO',{summary:p.symbol+' '+state,proposalId:p.id});
-      }else{if(kind==='RECONCILED')this.analytics.snapshot('RECONCILIATION');this.notifications.emit(kind+':'+nowIso(),kind,kind==='RECONCILIATION_FAILURE'?'CRITICAL':'INFO',{summary:kind,...detail});}
+      }else{if(kind==='RECONCILED')this.analytics.snapshot('RECONCILIATION');if(kind!=='RECONCILED')this.notifications.emit(kind+':'+stableHash(detail),kind,kind==='RECONCILIATION_FAILURE'?'CRITICAL':'INFO',{summary:kind,...detail});}
     }catch{this.database.audit('OBSERVABILITY','EVENT_SIDE_EFFECT_FAILED','system',null,{kind});}};
     this.codexTasks=new CodexTaskService(this.database,this.proposals);
     this.codexTasks.runSimulation=actor=>this.fullSimulation.start(actor,0);
+    this.autonomousSupervisor=createAutonomousSupervisor(this);
     this.tradingAgent=new PersistentTradingAgent(this.database,this.proposals);
     this.tradingAgent.runSimulation=speed=>this.fullSimulation.start('IN_APP_AGENT',speed);
     this.tradingAgent.inspect=area=>{switch(area){case 'RISK_SETTINGS':return {...this.riskConfiguration.current(),descriptors:this.riskConfiguration.descriptors()};case 'CONFIG_HISTORY':return this.riskConfiguration.history();case 'CONNECTORS':return this.connectors.list();case 'HEALTH':return this.health();case 'SCHEDULER':return this.tradingScheduler.list();case 'NOTIFICATIONS':return {preferences:this.notifications.preferences(),events:this.notifications.list()};case 'SIMULATIONS':return this.fullSimulation.list();case 'PROPOSALS':return this.proposals.list();case 'ALLOCATIONS':return ['SAFE_LONG_TERM','AGGRESSIVE_STOCKS','OPTIONS'].map(s=>this.allocation.state(s as import('../../trading-v2/src/model.js').Sleeve));case 'OPTIONS':return this.database.raw.prepare('SELECT * FROM option_positions').all();case 'FILLS':return this.database.raw.prepare('SELECT * FROM fills ORDER BY executed_at DESC LIMIT 100').all();case 'RISK_EVENTS':return this.database.raw.prepare('SELECT * FROM risk_events ORDER BY created_at DESC LIMIT 100').all();default:throw new Error('Unsupported application inspection');}};
     this.tradingScheduler=new PersistedTradingScheduler(this.database,this.proposals,async(sleeve)=>{
+      if(this.database.getMode()!=='SIMULATION'&&!this.market.tradingEligible)return;
       const candidate=this.ledger.listPositions(sleeve)[0]?.symbol;
       if(candidate&&sleeve!=='OPTIONS')await this.agents.analyze(sleeve,candidate,false);
       // Scheduled research is not an autonomous order generator. It never fabricates evidence.
@@ -127,6 +135,7 @@ export class AgenticManager {
     });
     this.jobs.register('AGENT_REVIEW', async (job, signal) => {
       if (signal.aborted) return;
+      if(this.database.getMode()!=='SIMULATION'&&!this.market.tradingEligible)return;
       const strategyId = String(job.payload.strategyId ?? ''); const symbol = String(job.payload.symbol ?? '');
       if (!this.database.getStrategy(strategyId) || !/^[A-Z][A-Z0-9.-]{0,9}$/.test(symbol)) return;
       await this.agents.analyze(strategyId, symbol, this.database.getSetting<boolean>('codex_reasoning_enabled', false));
@@ -159,12 +168,14 @@ export class AgenticManager {
         this.database.audit('STARTUP', 'BROKER_STARTUP_CHECK_FAILED', 'system', null, { error: error instanceof Error ? error.message : String(error) });
       }
     }
-    if (this.options.startBackgroundServices !== false) { this.jobs.start(); this.watcher.start(); this.scheduler.start(); this.codexTasks.start(); }
+    if(this.database.getMode()==='AUTONOMOUS_LIVE'&&!this.database.getSetting('reconciliation_clear',false))revokeAutonomy(this.database,'Startup reconciliation failed');
+    if (this.options.startBackgroundServices !== false) { this.jobs.start(); this.watcher.start(); this.scheduler.start(); this.codexTasks.start();this.autonomousSupervisor.start(); }
     this.ready = true; this.database.setSetting('startup_ready', true);
+    try{await refreshCommissioning(this);}catch(error){this.database.audit('READINESS','AUTOMATIC_READINESS_REFRESH_FAILED','system',null,{error:String(error)});}
     this.events.publish({ type: 'SYSTEM_READY', severity: 'INFO', source: 'AGENTIC_MANAGER', payload: { mode: this.database.getMode() } });
   }
 
-  async shutdown(): Promise<void> { await this.codexTasks.stop(); this.scheduler.stop(); this.watcher.stop(); this.jobs.stop(); await this.fullSimulation.shutdown(); await this.connectors.robinhood.close(); this.ready = false; this.database.setSetting('startup_ready', false); this.database.close(); }
+  async shutdown(): Promise<void> { this.autonomousSupervisor.stop();await this.codexTasks.stop(); this.scheduler.stop(); this.watcher.stop(); this.jobs.stop(); await this.fullSimulation.shutdown(); await this.connectors.robinhood.close(); this.ready = false; this.database.setSetting('startup_ready', false); this.database.close(); }
 
   health(): HealthReport {
     const mode = this.database.getMode();
@@ -172,7 +183,7 @@ export class AgenticManager {
     const codexTasks=this.codexTasks.list();
     const connectorStates=this.connectors.list(),brokerState=connectorStates.find(c=>c.id==='ROBINHOOD');
     return {
-      status: this.ready ? (mode!=='LIVE'||this.database.getSetting<boolean>('reconciliation_clear', false) ? 'healthy' : 'degraded') : 'unhealthy', version: '2.0.0', mode,
+      status: this.ready ? (!liveMode(mode)||this.database.getSetting<boolean>('reconciliation_clear', false) ? 'healthy' : 'degraded') : 'unhealthy', version: '2.0.0', mode,
       uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1_000), ready: this.ready,
       checks: {
         database: { ok: true, message: 'SQLite available with foreign keys and WAL where persistent.' },
@@ -215,6 +226,7 @@ export class AgenticManager {
   }
 
   private configureSchedules(): void {
+    this.scheduler.every('automatic-readiness-refresh',3600000,async()=>{await refreshCommissioning(this);});
     this.scheduler.every('v2-persisted-jobs',15000,async()=>{await this.tradingScheduler.tick();});
     this.scheduler.every('directive-expiry', 60_000, async () => { this.directives.expireDue(); });
     this.scheduler.every('performance-snapshot', 15 * 60_000, async () => { this.recordPerformance(); });

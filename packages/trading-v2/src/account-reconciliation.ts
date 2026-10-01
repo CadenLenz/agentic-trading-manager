@@ -4,6 +4,8 @@ import type {ProposalService} from './proposals.js';
 import {SLEEVES,sleeveSchema,type TradingBroker} from './model.js';
 import {makeId,nowIso,roundMoney} from '../../core/src/utils.js';
 import {weekKey} from './capital.js';
+import {RiskConfigurationService} from './configuration.js';
+import {pacificPeriodStart} from './periods.js';
 import type {IncompleteBrokerObservation} from './worker-broker.js';
 
 type Account=Awaited<ReturnType<TradingBroker['account']>>;
@@ -28,7 +30,7 @@ export class AccountReconciliationService {
     if(!Number.isFinite(a.cash)||a.cash<0||!Number.isFinite(a.buyingPower)||a.buyingPower<0||!Number.isFinite(a.netAccountValue)||a.netAccountValue<0)throw new Error('Broker balances are invalid.');
     if(new Set(a.positions.map(p=>p.symbol)).size!==a.positions.length||a.positions.some(p=>!Number.isFinite(p.quantity)||p.quantity<=0||p.averageCost!==null&&(!Number.isFinite(p.averageCost)||p.averageCost<0)||!Number.isFinite(p.price)||p.price<=0))throw new Error('Broker holdings need individual review.');
     const queries=[
-      'SELECT 1 FROM strategy_positions LIMIT 1','SELECT 1 FROM strategy_lots LIMIT 1','SELECT 1 FROM fills LIMIT 1',
+      'SELECT 1 FROM strategy_positions LIMIT 1','SELECT 1 FROM strategy_lots LIMIT 1','SELECT 1 FROM fills LIMIT 1','SELECT 1 FROM legacy_positions LIMIT 1',
       'SELECT 1 FROM option_positions LIMIT 1','SELECT 1 FROM position_assignments LIMIT 1',
       "SELECT 1 FROM broker_events WHERE status='APPLIED' LIMIT 1",
       'SELECT 1 FROM virtual_transactions LIMIT 1',
@@ -48,8 +50,58 @@ export class AccountReconciliationService {
     return {clear:this.db.getSetting('reconciliation_clear',false),lastRunAt:this.db.getSetting<string|null>('last_reconciliation_at',null),mismatches:this.db.getSetting<string[]>('reconciliation_v2',[]),
       warnings:this.db.getSetting<string[]>('reconciliation_warnings_v2',[]),
       positions:[...new Set([...internal.map(p=>p.symbol),...(observed?.positions??[]).map(p=>p.symbol)])].map(symbol=>({symbol,internal:internal.find(p=>p.symbol===symbol)?.quantity??0,broker:observed?.positions.find(p=>p.symbol===symbol)?.quantity??0,averageCost:observed?.positions.find(p=>p.symbol===symbol)?.averageCost??null})),
-      cash:{internal:internalCash,broker:observed?.cash??null,buyingPower:observed?.buyingPower??null},account:observed,snapshotComplete:!!a,
+      cash:{internal:internalCash,broker:observed?.cash??null,buyingPower:observed?.buyingPower??null},account:observed,snapshotComplete:!!a,legacyPositions:this.proposals.ledger.legacyPositions(),
       initialImport:{available:!importBlocked,reason:importBlocked,token:a?this.token(a):null}};
+  }
+  /** Commission current broker facts without inventing historical sleeve ownership or P&L. */
+  async normalizeReviewedOpening(actor:string){
+    if(this.db.getMode()!=='READ_ONLY'||!this.db.getSetting('global_pause',false))throw new Error('Paused Read only required for opening normalization');
+    const result=await this.proposals.reconcile(),a=result.account,opening=this.db.getSetting<{accountId:string;at:string;openingNetAccountValue?:number}|null>('initial_account_import_v2',null);
+    if(!opening||opening.accountId!==a.accountId||!result.clear)throw new Error('Existing reviewed opening and clean scoped reconciliation required');
+    const inception=SLEEVES.reduce((n,s)=>n+this.proposals.allocation.state(s).startingCapital,0);
+    this.db.raw.transaction(()=>{
+      for(const s of SLEEVES){const state=this.proposals.allocation.state(s),strategy=this.db.getStrategy(s)!;this.db.raw.prepare('UPDATE strategies SET allocation_amount=?,config_json=?,updated_at=? WHERE id=?').run(state.startingCapital,JSON.stringify({...strategy.config,allocationAmount:state.startingCapital}),nowIso(),s);}
+      const risk=this.db.getGlobalRisk();
+      if(risk.minimumReservedCash===5000){const minimumReservedCash=Math.max(25,roundMoney(a.cash*.1));this.db.setSetting('global_risk',{...risk,minimumReservedCash});this.db.audit(actor,'SYNTHETIC_DEFAULT_RESERVE_NORMALIZED','risk',null,{before:5000,after:minimumReservedCash,verifiedBrokerCash:a.cash,policy:'10_PERCENT_CASH_MINIMUM_25_USD',otherLimitsChanged:false});}
+      const configuration=new RiskConfigurationService(this.db),current=configuration.current();
+      if(current.version===0){current.config.global.fractionalTradingAllowed=true;current.config.strategies.SAFE_LONG_TERM={...current.config.strategies.SAFE_LONG_TERM,minMarketCap:10000000000,earningsTradingAllowed:true};configuration.apply(current.config,0,actor,'Commission default quality investing and broker-supported fractional shares','APPLY RISK CONFIGURATION');}
+      this.db.setSetting('initial_account_import_v2',{...opening,openingNetAccountValue:opening.openingNetAccountValue??inception});
+      this.db.setSetting('v2_migration_review_required',false);
+      if(!this.db.getSetting('daily_equity_baseline_v2',null))this.db.setSetting('daily_equity_baseline_v2',{date:pacificPeriodStart('DAY'),equity:pacificPeriodStart('DAY',new Date(opening.at))===pacificPeriodStart('DAY')?inception:a.netAccountValue});
+      if(!this.db.getSetting('weekly_account_baseline_v2',null))this.db.setSetting('weekly_account_baseline_v2',{week:weekKey(),equity:weekKey(new Date(opening.at))===weekKey()?inception:a.netAccountValue});
+      this.db.audit(actor,'REVIEWED_OPENING_NORMALIZED','account',a.accountId,{inception,positionsReassigned:false,cashReallocated:false,brokerTradingPerformed:false});
+    })();return this.proposals.reconcile();
+  }
+  async commissionLegacy(actor:string){
+    if(this.db.getMode()!=='READ_ONLY'||!this.db.getSetting('global_pause',false))throw new Error('Pause the app in Read only before importing an opening balance.');
+    const {account:a}=await this.proposals.reconcile();this.guard(a);
+    const before=this.report(),at=nowIso(),reference=makeId('opening');
+    const cents=Math.round(a.cash*100),base=Math.floor(cents/SLEEVES.length);
+    const cash=Object.fromEntries(SLEEVES.map((s,i)=>[s,(base+(i<cents%SLEEVES.length?1:0))/100])) as Record<typeof SLEEVES[number],number>;
+    this.db.raw.transaction(()=>{
+      this.guard(a);
+      for(const s of SLEEVES){
+        const previous=this.proposals.ledger.getCash(s);
+        this.db.raw.prepare('UPDATE strategy_cash SET balance=?,updated_at=? WHERE strategy_id=?').run(cash[s],at,s);
+        const strategy=this.db.getStrategy(s)!;const config={...strategy.config,allocationAmount:cash[s]};
+        this.db.raw.prepare('UPDATE strategies SET allocation_amount=?,config_json=?,updated_at=? WHERE id=?').run(cash[s],JSON.stringify(config),at,s);
+        this.db.raw.prepare('INSERT INTO virtual_transactions VALUES(?,?,?,?,?,?,?,?,?,?)').run(makeId('txn'),reference+':'+s,s,'OPENING_BALANCE_CORRECTION',roundMoney(cash[s]-previous),null,null,reference,JSON.stringify({accountId:a.accountId,previous,verifiedCash:cash[s],allocationPolicy:'EQUAL_THIRDS_CENT_REMAINDER_IN_SLEEVE_ORDER',historicalProfitOrLoss:false}),at);
+        this.db.raw.prepare('UPDATE strategy_capital SET starting_capital=?,weekly_starting_capital=?,high_water_mark=?,week_key=? WHERE strategy_id=?').run(cash[s],cash[s],cash[s],weekKey(),s);
+      }
+      for(const p of a.positions)this.db.raw.prepare('INSERT INTO legacy_positions(symbol,quantity,average_cost,market_price,asset_type,account_id,opening_reference,updated_at) VALUES(?,?,?,?,?,?,?,?)').run(p.symbol,p.quantity,p.averageCost,p.price,p.assetClass,a.accountId,reference,at);
+      const unavailableBasis=a.positions.filter(p=>p.averageCost===null).map(p=>p.symbol);
+      const configuration=new RiskConfigurationService(this.db),current=configuration.current();
+      if(current.version===0){current.config.global.fractionalTradingAllowed=true;current.config.strategies.SAFE_LONG_TERM={...current.config.strategies.SAFE_LONG_TERM,minMarketCap:10000000000,earningsTradingAllowed:true};configuration.apply(current.config,0,actor,'Commission default quality investing and broker-supported fractional shares','APPLY RISK CONFIGURATION');}
+      const risk=this.db.getGlobalRisk();
+      if(risk.minimumReservedCash===5000){const minimumReservedCash=Math.max(25,roundMoney(a.cash*.1));this.db.setSetting('global_risk',{...risk,minimumReservedCash});this.db.audit(actor,'SYNTHETIC_DEFAULT_RESERVE_NORMALIZED','risk',null,{before:5000,after:minimumReservedCash,verifiedBrokerCash:a.cash,policy:'10_PERCENT_CASH_MINIMUM_25_USD',otherLimitsChanged:false});}
+      this.db.setSetting('v2_migration_review_required',false);
+      this.db.setSetting('daily_equity_baseline_v2',{date:pacificPeriodStart('DAY'),equity:a.netAccountValue});
+      this.db.setSetting('weekly_account_baseline_v2',{week:weekKey(),equity:a.netAccountValue});
+      this.db.setSetting('initial_account_import_v2',{reference,accountId:a.accountId,at,actor,ownership:'LEGACY',openingNetAccountValue:a.netAccountValue,openingLegacyMarketValue:roundMoney(a.positions.reduce((n,p)=>n+p.quantity*p.price,0)),unavailableBasis,allocationPolicy:'EQUAL_THIRDS_CENT_REMAINDER_IN_SLEEVE_ORDER'});
+      this.db.setSetting('reconciliation_clear',false);this.db.setSetting('global_pause',true);
+      this.db.audit(actor,'INITIAL_ACCOUNT_IMPORT','account',a.accountId,{before,reference,ownership:'LEGACY',positions:a.positions,cash,verifiedBrokerCash:a.cash,verifiedBrokerBuyingPower:a.buyingPower,allocationPolicy:'EQUAL_THIRDS_CENT_REMAINDER_IN_SLEEVE_ORDER',basisAcknowledgement:'These holdings were imported from Robinhood and cost basis is currently unavailable.',unavailableBasis,brokerTradingPerformed:false,historicalProfitOrLossFabricated:false});
+    })();
+    return this.proposals.reconcile();
   }
   async importOpeningBalance(input:unknown,actor:string){
     const b=initialAccountImportSchema.parse(input);

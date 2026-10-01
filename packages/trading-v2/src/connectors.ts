@@ -1,4 +1,5 @@
 import {officialOrderArguments} from './official-orders.js';
+import {autonomousExecutionAuthorized,liveMode} from './autonomy.js';
 import type {ExecutableOrder} from './model.js';
 import {readFileSync,writeFileSync,existsSync,mkdirSync,chmodSync,renameSync,rmSync} from 'node:fs';
 import {dirname,join} from 'node:path';
@@ -88,9 +89,10 @@ export class OfficialRobinhoodConnection{
     if(cancelling){if(args.order_id!==row.broker_order_id||!['BROKER_ACCEPTED','PARTIALLY_FILLED'].includes(row.state))throw new Error('Cancel requires an attributed open broker order');}
     else{
       const approval=JSON.parse(row.approval_json??'null') as {version:number;hash:string;expiresAt:string}|null;
-      if(this.db.getMode()!=='LIVE'||!this.db.getSetting('v2_live_activation',false)||!this.db.getSetting('live_db_confirmation',false)||this.db.getSetting('global_pause',true)||this.db.getSetting('stopped',false)||this.db.getSetting('maintenance_mode',false)||!this.db.getSetting('reconciliation_clear',false))throw new Error('Manual LIVE execution gates are closed');
+      if(!liveMode(this.db.getMode())||!this.db.getSetting('v2_live_activation',false)||!this.db.getSetting('live_db_confirmation',false)||this.db.getSetting('global_pause',true)||this.db.getSetting('stopped',false)||this.db.getSetting('maintenance_mode',false)||!this.db.getSetting('reconciliation_clear',false))throw new Error('LIVE execution gates are closed');
       if(JSON.stringify(args)!==JSON.stringify(officialOrderArguments(JSON.parse(row.order_json) as ExecutableOrder,process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID!,true)))throw new Error('Broker mutation differs from the approved executable order');
-      if(row.state!=='EXECUTION_SENT'||!approval||approval.version!==row.version||approval.hash!==row.preview_hash||Date.parse(approval.expiresAt)<=Date.now())throw new Error('Current manual approval required');
+      const automatic=autonomousExecutionAuthorized(this.db,proposalId,row.version,row.preview_hash,(JSON.parse(row.order_json) as ExecutableOrder).strategy);
+      if(row.state!=='EXECUTION_SENT'||(!automatic&&(!approval||approval.version!==row.version||approval.hash!==row.preview_hash||Date.parse(approval.expiresAt)<=Date.now())))throw new Error('Current execution authorization required');
     }
     await this.check('DETERMINISTIC_EXECUTOR');const tool=this.tools.get(name);
     if(!tool||!new Ajv({strict:false}).compile(tool.inputSchema)(args))throw new Error('Execution arguments do not match the discovered official schema');
@@ -98,8 +100,9 @@ export class OfficialRobinhoodConnection{
       const current=this.db.raw.prepare('SELECT version,state,approval_json,preview_hash FROM proposals WHERE id=?').get(proposalId) as typeof row;
       const approval=JSON.parse(current?.approval_json??'null') as {version:number;hash:string;expiresAt:string}|null;
       const order=JSON.parse(row.order_json) as ExecutableOrder;
-      if(this.db.getMode()!=='LIVE'||this.db.getSetting('stopped',false)||this.db.getSetting('global_pause',true)||this.db.getSetting('maintenance_mode',false)||!this.db.getSetting('reconciliation_clear',false)||!this.db.getSetting('live_db_confirmation',false)||!this.db.getSetting('v2_live_activation',false)||!this.db.getStrategy(order.strategy)?.enabled)throw new Error('STOP/pause revoked execution before broker submission');
-      if(!current||current.state!=='EXECUTION_SENT'||!approval||approval.version!==current.version||approval.hash!==current.preview_hash||Date.parse(approval.expiresAt)<=Date.now())throw new Error('Manual approval expired before broker submission');
+      if(!liveMode(this.db.getMode())||this.db.getSetting('stopped',false)||this.db.getSetting('global_pause',true)||this.db.getSetting('maintenance_mode',false)||!this.db.getSetting('reconciliation_clear',false)||!this.db.getSetting('live_db_confirmation',false)||!this.db.getSetting('v2_live_activation',false)||!this.db.getStrategy(order.strategy)?.enabled)throw new Error('STOP/pause revoked execution before broker submission');
+      const automatic=current&&autonomousExecutionAuthorized(this.db,proposalId,current.version,current.preview_hash,order.strategy);
+      if(!current||current.state!=='EXECUTION_SENT'||(!automatic&&(!approval||approval.version!==current.version||approval.hash!==current.preview_hash||Date.parse(approval.expiresAt)<=Date.now())))throw new Error('Execution authorization expired before broker submission');
     }
     this.db.audit('EXECUTION_ENGINE','BROKER_MUTATION_SENT','proposal',proposalId,{name,arguments:args,retry:false});
     const result=await this.worker.brokerExecute(name,args);

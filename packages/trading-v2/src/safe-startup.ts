@@ -1,9 +1,19 @@
 import type {AppDatabase} from '../../database/src/database.js';
 import {SLEEVES} from './model.js';
+import {revokeAutonomy,type AutonomousAuthorization} from './autonomy.js';
 
 /** An unattended restart never restores permission to trade real money. */
 export function enforceSafeStartup(db:AppDatabase){
   if(db.getMode()==='SIMULATION')return;
+  const auth=db.getSetting<AutonomousAuthorization|null>('autonomous_authorization_v1',null);
+  const unsafe=db.getSetting('stopped',false)||db.getSetting('global_pause',true)||db.getSetting('maintenance_mode',false)||
+    !!db.raw.prepare("SELECT proposal_id FROM executions_v2 WHERE status='UNKNOWN_OUTCOME' OR (status='PENDING' AND broker_order_id IS NULL) LIMIT 1").get()||
+    !!db.raw.prepare('SELECT strategy_id FROM strategy_capital WHERE killed=1 LIMIT 1').get();
+  if(db.getMode()==='AUTONOMOUS_LIVE'&&auth&&auth.accountId===process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID&&!unsafe){
+    db.setSetting('reconciliation_clear',false);
+    db.audit('STARTUP','AUTONOMY_REVALIDATION','system',null,{authorizationId:auth.id});return;
+  }
+  revokeAutonomy(db,'Unattended recovery lacks a safe persisted authorization');
   db.raw.transaction(()=>{
     db.setSetting('operating_mode','READ_ONLY');
     db.setSetting('global_pause',true);

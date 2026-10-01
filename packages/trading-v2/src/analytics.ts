@@ -9,7 +9,7 @@ export class PortfolioAnalytics{
   private verifiedSince(since:string,mode:string,account:string){const opening=this.db.getSetting<{accountId:string;at:string}|null>('initial_account_import_v2',null);return mode!=='SIMULATION'&&opening?.accountId===account&&opening.at>since?opening.at:since;}
   snapshot(reason:string,externalFlow=0,at=nowIso()){
     const sleeves=SLEEVES.map(s=>this.allocation.state(s)),a=this.db.getSetting<{accountId:string;buyingPower:number}|null>('broker_account_v2',null),id=makeId('snapshot');
-    const cash=sleeves.reduce((n,s)=>n+s.cash,0),equity=sleeves.reduce((n,s)=>n+s.currentEquity,0);
+    const cash=sleeves.reduce((n,s)=>n+s.cash,0),equity=sleeves.reduce((n,s)=>n+s.currentEquity,0)+this.ledger.legacyPositions().reduce((n,p)=>n+p.marketValue,0);
     this.db.raw.transaction(()=>{this.db.raw.prepare('INSERT INTO portfolio_snapshots VALUES(?,?,?,?,?,?,?,?,?)').run(id,this.db.getMode()==='SIMULATION'?'SIMULATION':a?.accountId??'UNVERIFIED',this.db.getMode(),equity,cash,a?.buyingPower??null,externalFlow,reason,at);
       for(const s of sleeves){this.db.raw.prepare('INSERT INTO strategy_snapshots VALUES(?,?,?,?,?,?,?,?)').run(makeId('ss'),id,s.strategy,s.currentEquity,s.cash,s.realizedPnL,s.unrealizedPnL,at);
         for(const p of s.positions)this.db.raw.prepare('INSERT INTO position_snapshots VALUES(?,?,?,?,?,?,?,?,?)').run(makeId('ps'),id,s.strategy,p.symbol,p.quantity,p.marketPrice,p.marketValue,p.unrealizedPnl,at);
@@ -66,7 +66,7 @@ export class PortfolioAnalytics{
       delta:latest.delta??null,gamma:latest.gamma??null,theta:latest.theta??null,vega:latest.vega??null,iv:latest.iv??null,ivRank:null,latest,observations,fills,executions:related,proposalIds:ids,assignmentRisk:contracts<0?'Short options can be assigned; explicit event review required':'Long exercise requires verified shares/cash',unavailableValuesAreNull:true};
   }
   report(kind:string){
-    const at=nowIso(),weekly=kind==='WEEKLY_REPORT',since=pacificPeriodStart(weekly?'WEEK':'DAY');
+    const at=nowIso(),weekly=kind.startsWith('WEEKLY_REPORT'),since=pacificPeriodStart(weekly?'WEEK':'DAY');
     const states=SLEEVES.map(s=>this.allocation.state(s)),account=this.db.getSetting<{asOf:string;netAccountValue:number}|null>('broker_account_v2',null);
     const orders=this.db.raw.prepare('SELECT * FROM orders WHERE created_at>=? ORDER BY created_at').all(since),fills=this.db.raw.prepare('SELECT * FROM fills WHERE executed_at>=? ORDER BY executed_at').all(since);
     const events=this.db.raw.prepare('SELECT * FROM risk_events WHERE created_at>=? ORDER BY created_at').all(since);

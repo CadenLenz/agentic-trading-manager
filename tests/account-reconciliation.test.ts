@@ -21,6 +21,23 @@ async function fixture(){
   return {account,broker,forbidden,proposals,service,request};
 }
 describe('Reviewed initial broker account import',()=>{
+  it('normalizes stale setup defaults without reassigning reviewed positions or cash',async()=>{
+    const {service,request,forbidden}=await fixture();await service.importOpeningBalance(request(),'operator');
+    const holdings=()=>manager.ledger.listPositions().map(p=>({symbol:p.symbol,strategy:p.strategyId,quantity:p.quantity,averageCost:p.averageCost}));
+    const positions=holdings(),cash=SLEEVES.map(s=>manager.ledger.getCash(s));
+    expect((await service.normalizeReviewedOpening('operator')).clear).toBe(true);
+    expect(holdings()).toEqual(positions);expect(SLEEVES.map(s=>manager.ledger.getCash(s))).toEqual(cash);
+    expect(manager.database.getGlobalRisk().minimumReservedCash).toBe(50.05);expect(forbidden).not.toHaveBeenCalled();
+  });
+  it('commissions legacy holdings and actual cash without inventing ownership or basis, and audits the synthetic reserve correction',async()=>{
+    const {account,service,forbidden}=await fixture();account.positions[0]!.averageCost=null;
+    expect((await service.commissionLegacy('operator')).clear).toBe(true);
+    expect(manager.ledger.listPositions()).toEqual([]);expect(manager.ledger.legacyPositions()[1]).toMatchObject({symbol:'TSLA',strategyId:'LEGACY',averageCost:null,unrealizedPnl:null,basisStatus:'UNAVAILABLE_EXTERNAL'});
+    expect(service.report().cash.internal).toBe(account.cash);expect(manager.database.getGlobalRisk().minimumReservedCash).toBe(50.05);
+    expect(manager.ledger.aggregatePositions().reduce((n,p)=>n+p.marketValue,0)).toBe(440);
+    expect(manager.analytics.snapshot('COMMISSIONED').equity).toBe(account.netAccountValue);
+    expect(forbidden).not.toHaveBeenCalled();await expect(service.commissionLegacy('operator')).rejects.toThrow();
+  });
   it('imports unavailable basis only with explicit acknowledgement, preserving null P&L and exact exposure',async()=>{
     const {account,service,request,proposals}=await fixture();account.positions[0]!.averageCost=null;
     await proposals.reconcile();expect(service.report().initialImport.available).toBe(true);

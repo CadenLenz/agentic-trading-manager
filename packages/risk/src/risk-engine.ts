@@ -102,16 +102,19 @@ export class RiskEngine {
     const cash = this.database.listStrategies().reduce((sum, strategy) => sum + strategy.cash, 0);
     const exposure = positions.reduce((sum, position) => sum + position.marketValue, 0);
     const realized = this.ledger.getRealizedPnl();
+    if(realized===null)throw new Error('Historical realized P&L unavailable for basis-dependent risk');
     const unrealized = positions.reduce((sum, position) => sum + this.requirePnl(position), 0);
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const week = new Date(today); week.setDate(today.getDate() - ((today.getDay() + 6) % 7));
+    const weeklyRealized=this.ledger.getRealizedPnl(undefined,week.toISOString());
+    if(weeklyRealized===null)throw new Error('Weekly realized P&L unavailable for basis-dependent risk');
     const sectors: Record<string, number> = {};
     for (const position of positions) sectors[position.sector] = (sectors[position.sector] ?? 0) + position.marketValue;
     const todayTrades = this.database.raw.prepare("SELECT COUNT(*) AS count FROM orders WHERE side='BUY' AND created_at>=? AND status NOT IN ('REJECTED','CANCELED')").get(today.toISOString()) as { count: number };
     return {
       autonomous: true, reconciliationClear: this.database.getSetting<boolean>('reconciliation_clear', true), marketOpen: true,
       accountEquity: roundMoney(cash + exposure || designatedCapital), accountCash: roundMoney(cash), dailyPnl: roundMoney(realized + unrealized),
-      weeklyPnl: roundMoney(this.ledger.getRealizedPnl(undefined, week.toISOString()) + unrealized), openPositionCount: positions.length,
+      weeklyPnl: roundMoney(weeklyRealized + unrealized), openPositionCount: positions.length,
       tradesToday: todayTrades.count, sectorExposure: sectors, consecutiveLosses: 0,
       marketDataTradingEligible: this.database.getSetting<boolean>('market_data_trading_eligible', false),
     };
@@ -144,6 +147,7 @@ export class RiskEngine {
   private strategyPnl(strategyId: string, includeUnrealized: boolean): number {
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const realized = this.ledger.getRealizedPnl(strategyId, today.toISOString());
+    if(realized===null)throw new Error('Sleeve realized P&L unavailable for basis-dependent risk');
     const unrealized = includeUnrealized ? this.ledger.listPositions(strategyId).reduce((sum, position) => sum + this.requirePnl(position), 0) : 0;
     return roundMoney(realized + unrealized);
   }

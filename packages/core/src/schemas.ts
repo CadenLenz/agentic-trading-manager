@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const operatingModeSchema = z.enum(['SIMULATION', 'READ_ONLY', 'LIVE']);
+export const operatingModeSchema = z.enum(['SIMULATION', 'READ_ONLY', 'LIVE', 'MANUAL_LIVE', 'AUTONOMOUS_LIVE']);
 export const assetTypeSchema = z.enum(['EQUITY', 'ETF', 'OPTION', 'CRYPTO']);
 export const orderIntentSchema = z.object({
   side: z.enum(['BUY', 'SELL']),

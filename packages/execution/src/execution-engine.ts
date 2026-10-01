@@ -7,7 +7,7 @@ import type { RiskEngine } from '../../risk/src/risk-engine.js';
 import type { RobinhoodMcpAdapter } from '../../robinhood/src/adapter.js';
 import type { SimulationBroker } from './simulation-broker.js';
 
-export interface ExecutionResult { orderId: string | null; status: string; proposal: TradeProposal; risk: ReturnType<RiskEngine['evaluate']>; fill?: { realizedPnl: number; cash: number }; broker?: Record<string, unknown> }
+export interface ExecutionResult { orderId: string | null; status: string; proposal: TradeProposal; risk: ReturnType<RiskEngine['evaluate']>; fill?: { realizedPnl: number|null; cash: number }; broker?: Record<string, unknown> }
 
 export class ExecutionEngine {
   constructor(private readonly database: AppDatabase, private readonly ledger: VirtualPortfolioLedger, private readonly risk: RiskEngine, private readonly simulation: SimulationBroker, private readonly robinhood: RobinhoodMcpAdapter) {}

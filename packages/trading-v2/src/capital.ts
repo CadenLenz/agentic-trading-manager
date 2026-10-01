@@ -2,6 +2,7 @@ import type { AppDatabase } from '../../database/src/database.js';
 import type { VirtualPortfolioLedger } from '../../ledger/src/virtual-ledger.js';
 import { makeId, nowIso, roundMoney } from '../../core/src/utils.js';
 import { SLEEVES, sleevePolicySchema, type Sleeve, type SleevePolicy } from './model.js';
+import {revokeAutonomy} from './autonomy.js';
 
 export function weekKey(date = new Date()): string { const key=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Los_Angeles',year:'numeric',month:'2-digit',day:'2-digit'}).format(date);const d=new Date(key+'T12:00:00Z');d.setUTCDate(d.getUTCDate()-((d.getUTCDay()+6)%7));return d.toISOString().slice(0,10); }
 export class StrategyAllocationManager {
@@ -38,6 +39,7 @@ export class StrategyAllocationManager {
     if (drawdown>=60 && !c.killed) {
       this.db.raw.prepare('UPDATE strategy_capital SET killed=1,kill_reason=? WHERE strategy_id=?').run('60% emergency drawdown; weekly review/reset required',sleeve);
       this.db.setStrategyEnabled(sleeve,false,'RISK_ENGINE','60% emergency sleeve kill switch');
+      revokeAutonomy(this.db,'Sleeve emergency kill: '+sleeve);
       this.db.raw.prepare('INSERT INTO risk_events(id,strategy_id,severity,code,message,scope,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?)').run(makeId('risk'),sleeve,'CRITICAL','SLEEVE_EMERGENCY_KILL','60% emergency drawdown reached; reduce risk through validated exits and review','STRATEGY','{}',nowIso());
       c.killed=1;
     }

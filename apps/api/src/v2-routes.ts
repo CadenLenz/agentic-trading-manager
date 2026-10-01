@@ -1,4 +1,6 @@
 import {verifyCalendar2026} from '../../../packages/trading-v2/src/scheduling.js';
+import {autonomyChecks,authorizeAutonomy,revokeAutonomy,autonomousAuthorized} from '../../../packages/trading-v2/src/autonomy.js';
+import {supervisorConfigSchema} from '../../../packages/trading-v2/src/autonomous-supervisor.js';
 import {manualLiveChecks} from '../../../packages/trading-v2/src/manual-live.js';
 import {configurationEvidenceHash} from '../../../packages/trading-v2/src/configuration.js';
 import {taskSettings} from '../../../packages/agents/src/task-contract.js';
@@ -16,10 +18,38 @@ export function readiness(m:AgenticManager){
   const db=m.database,checks=manualLiveChecks(db);
   return {ready:Object.values(checks).every(Boolean),checks,liveActivation:db.getSetting('v2_live_activation',false),mode:db.getMode(),
     schemaVersion:(db.raw.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as {v:number}).v,gitSha:process.env.APP_GIT_SHA??'unrecorded',version:'2.0.0',uptime:m.health().uptimeSeconds,
-    limitation:'Manual LIVE requires every check below. Every transaction requires your approval. Option fills require review of actual fees from the Robinhood receipt when MCP omits them.'};
+    limitation:'Manual LIVE requires every check below. Every transaction requires your approval. Missing option charges are allocated only from a uniquely reconciled broker cash change bounded by official preview; ambiguous cash changes fail closed.'};
 }
 export function registerV2(app:FastifyInstance,m:AgenticManager){
   const db=m.database;
+  app.get('/api/v2/autonomy',()=>{
+    const checks=autonomyChecks(db),state=m.autonomousSupervisor.state();
+    const activity=db.raw.prepare("SELECT created_at AS at,action AS kind,action AS message FROM audit_events WHERE actor LIKE 'AUTONOMOUS%' OR action LIKE '%AUTONOM%' OR action='BROKER_MUTATION_SENT' ORDER BY created_at DESC LIMIT 20").all();
+    return {mode:db.getMode(),authorized:!!db.getSetting('autonomous_authorization_v1',null),ready:Object.values(checks).every(Boolean),checks,
+      supervisor:{config:m.autonomousSupervisor.config(),state},activity,
+      sleeves:SLEEVES.map(s=>{const a=m.allocation.state(s);return {strategy:s,enabled:!!db.getStrategy(s)?.enabled,autonomous:a.policy.executionPolicy==='AUTONOMOUS_RISK_APPROVED',killed:a.killed,killReason:a.killReason,allocation:a.currentEquity,realizedPnL:a.realizedPnL,unrealizedPnL:a.unrealizedPnL,riskStatus:autonomousAuthorized(db,s)?'Deterministic gates enforced':'Paused or blocked',behavior:db.getSetting('strategy_behavior:'+s,{}),activeTasks:m.codexTasks.list().filter(t=>t.strategy===s&&['QUEUED','RUNNING'].includes(t.status)),activeOrders:(db.raw.prepare("SELECT COUNT(*) AS n FROM orders WHERE strategy_id=? AND status IN ('PENDING','SUBMITTED','PARTIALLY_FILLED','UNKNOWN')").get(s) as {n:number}).n};})};
+  });
+  app.post('/api/v2/autonomy',async r=>{
+    const b=z.object({enabled:z.boolean(),confirmation:z.string().optional(),review:z.string().optional()}).strict().parse(r.body);
+    if(!b.enabled){revokeAutonomy(db,'Operator disabled autonomy');return {enabled:false};}
+    requireRecentAuth(m,actor(r),r.authUser!.csrf);
+    if(b.confirmation!=='ENABLE AUTONOMOUS LIVE'||(b.review?.trim().length??0)<20)throw new Error('Deliberate autonomous activation confirmation and review required');
+    await m.proposals.reconcile();
+    if(SLEEVES.some(s=>m.allocation.state(s).killed))throw new Error('Review and reset latched sleeve kill switches first');
+    return db.raw.transaction(()=>{
+      const authorization=authorizeAutonomy(db,actor(r),b.review!);
+      if(db.getSetting<{optionsLevel:number}>('broker_account_v2').optionsLevel===2)db.setSetting('global_risk',{...db.getGlobalRisk(),optionsEnabled:true});
+      for(const s of SLEEVES){const policy=m.allocation.policy(s);policy.executionPolicy='AUTONOMOUS_RISK_APPROVED';m.allocation.updatePolicy(s,policy,actor(r));db.setStrategyEnabled(s,true,actor(r),'Explicit global autonomous activation');}
+      return {enabled:true,authorization};
+    })();
+  });
+  app.post('/api/v2/autonomy/sleeves/:id',r=>{
+    const s=sleeveSchema.parse(params(r)),b=z.object({enabled:z.boolean()}).strict().parse(r.body);
+    if(b.enabled){requireRecentAuth(m,actor(r),r.authUser!.csrf);if(m.allocation.state(s).killed)throw new Error('Sleeve kill switch remains latched');}
+    const policy=m.allocation.policy(s);policy.executionPolicy=b.enabled?'AUTONOMOUS_RISK_APPROVED':'MANUAL_APPROVAL';m.allocation.updatePolicy(s,policy,actor(r));db.setStrategyEnabled(s,b.enabled,actor(r),'Sleeve autonomy control');return {enabled:b.enabled};
+  });
+  app.post('/api/v2/autonomy/config',r=>{const b=z.object({strategy:sleeveSchema,config:supervisorConfigSchema}).strict().parse(r.body);return m.autonomousSupervisor.configure(b.strategy,b.config,actor(r));});
+  app.post('/api/v2/reconciliation/commission-legacy',async r=>{requireRecentAuth(m,actor(r),r.authUser!.csrf);return reconciliation.commissionLegacy(actor(r));});
   const reconciliation=new AccountReconciliationService(m.proposals);
   app.get('/api/v2/reconciliation',()=>reconciliation.report());
   app.post('/api/v2/reconciliation/import',async r=>{requireRecentAuth(m,actor(r),r.authUser!.csrf);const result=await reconciliation.importOpeningBalance(r.body,actor(r));m.analytics.snapshot('INITIAL_ACCOUNT_IMPORT');return result;});
@@ -56,8 +86,8 @@ export function registerV2(app:FastifyInstance,m:AgenticManager){
     await m.connectors.robinhood.check('CAPABILITY_CHECK');const names=m.connectors.robinhood.catalog().map(t=>t.name);
     db.setSetting('manual_execution_capabilities_v2',['place_equity_order','place_option_order','cancel_equity_order','cancel_option_order','review_equity_order','review_option_order'].every(n=>names.includes(n)));
     const result=await m.proposals.reconcile();if(!result.clear)throw new Error('Review opening balance and ownership before checking broker review');
-    const held=m.ledger.listPositions().find(p=>p.quantity>=1);if(!held)throw new Error('Create a proposal and perform a broker preview to verify review capability');
-    const preview=await m.liveBroker.preview({clientOrderId:'CAPABILITY_CHECK_ONLY',strategy:sleeveSchema.parse(held.strategyId),assetClass:held.assetType==='ETF'?'ETF':'EQUITY',symbol:held.symbol,underlying:null,side:'SELL',positionEffect:'CLOSE',quantity:1,orderType:'LIMIT',limitPrice:held.marketPrice,stopPrice:null,timeInForce:'DAY',marketHours:'REGULAR',option:null});
+    const held=[...m.ledger.listPositions(),...m.ledger.legacyPositions()].find(p=>p.quantity>=1);if(!held)throw new Error('Create a proposal and perform a broker preview to verify review capability');
+    const preview=await m.liveBroker.preview({clientOrderId:'CAPABILITY_CHECK_ONLY',strategy:held.strategyId==='LEGACY'?'SAFE_LONG_TERM':sleeveSchema.parse(held.strategyId),assetClass:held.assetType==='ETF'?'ETF':'EQUITY',symbol:held.symbol,underlying:null,side:'SELL',positionEffect:'CLOSE',quantity:1,orderType:'LIMIT',limitPrice:held.marketPrice,stopPrice:null,timeInForce:'DAY',marketHours:'REGULAR',option:null});
     db.audit('COMMISSIONING','READ_ONLY_REVIEW_CAPABILITY','system',null,{symbol:held.symbol,preview,ordersPlaced:0});return {preview,ordersPlaced:0,readiness:readiness(m)};
   });
   app.post('/api/v2/instrument-review',async r=>{

@@ -7,7 +7,7 @@ export const STRATEGY_IDS = {
   options: 'OPTIONS',
 } as const;
 
-export type OperatingMode = 'SIMULATION' | 'READ_ONLY' | 'LIVE';
+export type OperatingMode = 'SIMULATION' | 'READ_ONLY' | 'LIVE' | 'MANUAL_LIVE' | 'AUTONOMOUS_LIVE';
 export type AgentStatus = 'IDLE' | 'WATCHING' | 'QUEUED' | 'ANALYZING' | 'AWAITING_DATA' | 'PROPOSING' | 'RISK_CHECK' | 'EXECUTING' | 'PAUSED' | 'ERROR';
 export type StrategyKind = 'DAY_TRADER' | 'AGGRESSIVE_GROWTH' | 'LONG_TERM' | 'SAFE_LONG_TERM' | 'AGGRESSIVE_STOCKS' | 'OPTIONS';
 export type OrderSide = 'BUY' | 'SELL';

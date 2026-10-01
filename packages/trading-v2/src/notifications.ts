@@ -2,7 +2,7 @@ import {z} from 'zod';
 import type {AppDatabase} from '../../database/src/database.js';
 import {makeId,nowIso} from '../../core/src/utils.js';
 export const notificationPreferencesSchema=z.object({inApp:z.boolean(),sms:z.boolean(),events:z.array(z.string().max(100)).max(50),quietStart:z.number().int().min(0).max(23),quietEnd:z.number().int().min(0).max(23),timeZone:z.enum(['America/Los_Angeles','UTC']),criticalOverridesQuiet:z.boolean()}).strict();
-export const DEFAULT_NOTIFICATIONS={inApp:true,sms:false,events:['OPTION_OPENED','OPTION_CLOSED','AGGRESSIVE_OPENED','AGGRESSIVE_CLOSED','PARTIAL_FILL','REJECTED','STOP','KILL_SWITCH','RECONCILIATION_FAILURE','BROKER_DISCONNECT','DAILY_REPORT','WEEKLY_REPORT'],quietStart:21,quietEnd:7,timeZone:'America/Los_Angeles' as const,criticalOverridesQuiet:false};
+export const DEFAULT_NOTIFICATIONS={inApp:true,sms:false,events:['TRADE_SUBMITTED','SAFE_TRADE','OPTION_OPENED','OPTION_CLOSED','AGGRESSIVE_OPENED','AGGRESSIVE_CLOSED','PARTIAL_FILL','REJECTED','STOP','KILL_SWITCH','RECONCILIATION_FAILURE','BROKER_DISCONNECT','DAILY_REPORT','WEEKLY_REPORT'],quietStart:21,quietEnd:7,timeZone:'America/Los_Angeles' as const,criticalOverridesQuiet:false};
 export interface NotificationProvider{send(body:string):Promise<{id:string}>}
 export class TwilioSmsProvider implements NotificationProvider{
   async send(body:string){const sid=process.env.TWILIO_ACCOUNT_SID,token=process.env.TWILIO_AUTH_TOKEN,from=process.env.TWILIO_FROM_NUMBER,to=process.env.SMS_TO_NUMBER;
