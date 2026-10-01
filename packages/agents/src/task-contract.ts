@@ -22,6 +22,11 @@ export const taskResponse=z.object({
   ]).nullable(),
 }).strict();
 export type TaskResponse=z.infer<typeof taskResponse>;
+export function taskOutputSchema(){
+  const schema=z.toJSONSchema(taskResponse,{target:'draft-7'});
+  const visit=(value:unknown)=>{if(!value||typeof value!=='object')return;const row=value as Record<string,unknown>;if(row.format==='uri')delete row.format;for(const child of Object.values(row))visit(child);};
+  visit(schema);return schema; // URL validity remains enforced by taskResponse.parse after generation.
+}
 export const templateVersion='2.0.0';
 export const objectives:Record<z.infer<typeof taskType>,string>={FREE_FORM_USER_REQUEST:'Answer the operator request using only relevant supplied facts.',RESEARCH_SYMBOL:'Research a symbol and cite observed sources; state missing data.',REVIEW_POSITION:'Review the position thesis, exposure and exit criteria.',REVIEW_STRATEGY:'Review sleeve holdings, allocation and deterministic limits.',REVIEW_OPTIONS:'Review options risk, collateral, expiration and ownership.',GENERATE_TRADE_PROPOSAL:'Draft a complete trade proposal only if facts support it; never submit an order.',RISK_CHANGE_PROPOSAL:'Convert operator strategy instructions into configure_strategies structured rules or specific risk edit proposals. Use LONG_TERM_QUALITY only for SAFE_LONG_TERM, SWING_MOMENTUM for AGGRESSIVE_STOCKS, ACTIVE_LEVEL2_OPTIONS for OPTIONS. Ordinary structured strategy rules are validated and persisted by the application.',EXPLAIN_RISK_REJECTION:'Explain the recorded deterministic rejection without bypassing it.',DAILY_REPORT:'Summarize today using supplied timestamps and source facts.',WEEKLY_REPORT:'Summarize the week using supplied timestamps and source facts.'};
 export function taskPrompt(task:TaskInput){return [

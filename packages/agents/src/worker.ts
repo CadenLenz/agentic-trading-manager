@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import {chmod,unlink} from 'node:fs/promises';
 import {z} from 'zod';
 import {CodexRunner,safeCodexEnvironment,scrubLog} from './codex-runner.js';
-import {taskInput,taskResponse,taskPrompt,validateAuthority,type TaskInput,type TaskResponse} from './task-contract.js';
+import {taskInput,taskResponse,taskOutputSchema,taskPrompt,validateAuthority,type TaskInput,type TaskResponse} from './task-contract.js';
 import {stableHash} from '../../core/src/utils.js';
 import type {BrokerTransport} from './codex-mcp.js';
 
@@ -52,7 +52,7 @@ export class CodexWorker {
     const health=await this.health();if(!health.usable)throw new Error('CODEX_UNAVAILABLE: ChatGPT login and compatible CLI required');job.version=health.version;
     if(requiresRobinhood(task)&&health.robinhood.state!=='CONNECTED')throw new Error('ROBINHOOD_'+health.robinhood.state+': broker-dependent task was not run');
     const brokerReady=health.robinhood.state==='CONNECTED';
-    const result=await this.runner.run({requestId:task.id,agent:'bounded reasoning worker',prompt:taskPrompt(task)+(brokerReady?'':'\nRobinhood MCP is unavailable for this task. Use supplied stored context only; state this limitation and do not claim fresh broker research.'),schema:z.toJSONSchema(taskResponse,{target:'draft-7'}),validate:value=>taskResponse.parse(value),workingDirectory:this.directory,timeoutMs:task.settings.timeoutMs,signal:controller.signal,model:task.settings.model,effort:task.settings.effort,robinhoodReads:brokerReady});
+    const result=await this.runner.run({requestId:task.id,agent:'bounded reasoning worker',prompt:taskPrompt(task)+(brokerReady?'':'\nRobinhood MCP is unavailable for this task. Use supplied stored context only; state this limitation and do not claim fresh broker research.'),schema:taskOutputSchema(),validate:value=>taskResponse.parse(value),workingDirectory:this.directory,timeoutMs:task.settings.timeoutMs,signal:controller.signal,model:task.settings.model,effort:task.settings.effort,robinhoodReads:brokerReady});
     validateAuthority(task,result.value);job.response=result.value;job.hash=stableHash(result.value);job.stdout=scrubLog(String(result.metadata.stdout??''));job.stderr=scrubLog(result.stderr);job.durationMs=result.durationMs;job.status='COMPLETED';
   }catch(error){if(error&&typeof error==='object'){if('stdout' in error)job.stdout=scrubLog(String(error.stdout));if('stderr' in error)job.stderr=scrubLog(String(error.stderr));}job.status=failureCode(error);job.error=job.status==='BLOCKED_USAGE_LIMIT'?'Codex usage is currently unavailable. This task was not run.':scrubLog(String(error)).slice(-2000);}
     finally{if(this.get(job.id).status==='CANCELLED'){job.status='CANCELLED';job.response=null;}job.endedAt=new Date().toISOString();this.save(job);this.active.delete(job.id);}
