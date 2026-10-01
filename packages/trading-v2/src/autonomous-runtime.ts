@@ -26,7 +26,7 @@ export function createAutonomousSupervisor(m:AgenticManager){
     workerAvailable:async()=>!!(await m.codexTasks.status()).usable,
     createReasoning:async r=>m.codexTasks.create(r.message+' Manage existing positions first. Propose at most one qualifying trade with current sourced research, or explain why no trade qualifies. Do not fabricate missing facts.','AUTONOMOUS_SUPERVISOR',{id:r.id,autonomous:r.sleeve}),
     taskStatus:id=>{const status=m.codexTasks.get(id).status;return status==='BLOCKED_USAGE_LIMIT'?'FAILED':status;},
-    report:r=>{m.analytics.report((r.kind==='WEEKLY'?'WEEKLY_REPORT':r.kind==='DAILY'?'DAILY_REPORT':'OPTIONS_EVENT')+':'+(r.sleeve??'ACCOUNT'));},
+    report:r=>{const kind=r.kind==='WEEKLY'?'WEEKLY_REPORT':r.kind==='DAILY'?'DAILY_REPORT':'OPTIONS_EVENT',scope=r.sleeve??'ACCOUNT';m.analytics.report(kind+':'+scope);m.notifications.emit('autonomous-report:'+kind+':'+scope+':'+r.contextHash,kind,'INFO',{summary:scope+' '+r.reason,scope});},
     onFault:reason=>{revokeAutonomy(db,reason);m.notifications.emit('autonomy-fault:'+reason,'RECONCILIATION_FAILURE','CRITICAL',{summary:reason});},
   });
 }
