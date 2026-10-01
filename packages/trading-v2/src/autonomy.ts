@@ -17,7 +17,7 @@ export function autonomyChecks(db:AppDatabase){
   void _;void __;
   // Configuration is validated on every order; the isolated smoke is release evidence.
   const smoke=db.getSetting<{sha:string}|null>('manual_live_safety_evidence',null);
-  return {...checks,deterministicRiskHealthy:!!smoke&&smoke.sha===(process.env.APP_GIT_SHA??'local')};
+  return {...checks,noLatchedSleeveStops:!db.raw.prepare('SELECT strategy_id FROM strategy_capital WHERE killed=1 LIMIT 1').get(),deterministicRiskHealthy:!!smoke&&smoke.sha===(process.env.APP_GIT_SHA??'local')};
 }
 export function authorizeAutonomy(db:AppDatabase,actor:string,review:string){
   const checks=autonomyChecks(db);if(!Object.values(checks).every(Boolean))throw new Error('Autonomous readiness blocked: '+Object.entries(checks).filter(([,ok])=>!ok).map(([k])=>k).join(', '));
