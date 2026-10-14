@@ -172,12 +172,17 @@ export class ProposalService {
       }
     }
     const legacy=this.db.getGlobalRisk(),config=this.db.getStrategy(p.strategy)!.config;
+    const reserved=this.db.raw.prepare("SELECT c.cash_amount AS amount,c.strategy_id AS strategy,p.body_json FROM capital_reservations c JOIN proposals p ON p.id=c.proposal_id WHERE c.status='ACTIVE' AND c.proposal_id<>?").all(id) as Array<{amount:number;strategy:string;body_json:string}>;
+    const pendingTicker=reserved.filter(r=>{const v=JSON.parse(r.body_json);return v.positionEffect==='OPEN'&&(v.underlying??v.symbol)===(p.underlying??p.symbol);}).reduce((n,r)=>n+r.amount,0);
+    const pendingAsset=reserved.filter(r=>{const v=JSON.parse(r.body_json);return r.strategy===p.strategy&&v.positionEffect==='OPEN'&&(p.option?v.option?.optionId===p.option.optionId:v.symbol===p.symbol);}).reduce((n,r)=>n+r.amount,0);
+    const heldOption=p.option?sleeve.options.find(o=>o.option_id===p.option?.optionId):null;
+    const ownedExposure=p.option?(heldOption?Math.abs(heldOption.contracts)*100*heldOption.mark_price+heldOption.collateral:0):position?.marketValue??0;
     const behavior=this.db.getSetting<{openNewPositions?:boolean;maxPortfolioRiskPercent?:number;extremeIvThreshold?:number|null;extremeIvSizeMultiplier?:number|null}>('strategy_behavior:'+p.strategy,{});
     check('ENTRIES_ENABLED',closing||behavior.openNewPositions!==false);
     if(p.option&&!closing&&behavior.extremeIvThreshold!=null&&behavior.extremeIvSizeMultiplier!=null)check('EXTREME_IV_SIZE',q.iv!==undefined&&Number.isFinite(q.iv)&&(q.iv<behavior.extremeIvThreshold||maxLoss<=sleeve.currentEquity*(behavior.maxPortfolioRiskPercent??effective.maxSleeveCapitalPerTradePercent)/100*behavior.extremeIvSizeMultiplier));
     const pendingCount=(this.db.raw.prepare("SELECT COUNT(*) AS n FROM capital_reservations WHERE status='ACTIVE'").get() as {n:number}).n;
     check('CONFIG_PENDING_LIMIT',closing||pendingCount<effective.maxPendingOrders);
-    check('CONFIG_SIZING',closing||maxLoss+(p.option?0:position?.marketValue??0)<=sleeve.currentEquity*effective.maxPositionPercent/100);
+    check('CONFIG_SIZING',closing||maxLoss+ownedExposure+pendingAsset<=sleeve.currentEquity*effective.maxPositionPercent/100);
     check('CONFIG_TRADE_RISK',closing||maxLoss<=sleeve.currentEquity*(p.option?effective.maxSleeveCapitalPerTradePercent:effective.perTradeRiskPercent)/100);
     check('CONFIG_ORDER_NOTIONAL',notional<=effective.maxOrderNotional);
     check('CONFIG_CASH',account.cash-cashRequired>=effective.minimumCashReserve);
@@ -194,9 +199,9 @@ export class ProposalService {
     check('LEGACY_ACCOUNT_RESERVE',account.cash-cashRequired>=legacy.minimumReservedCash);
     check('LEGACY_SLEEVE_RESERVE',sleeve.availableCapital-cashRequired>=sleeve.currentEquity*config.targetCashReservePercent/100);
     check('LEGACY_OPTIONS_ENABLED',!p.option||legacy.optionsEnabled);
-    check('LEGACY_POSITION_CAP',p.positionEffect==='CLOSE'||maxLoss+(p.option?0:position?.marketValue??0)<=sleeve.currentEquity*config.maxPositionPercent/100);
+    check('LEGACY_POSITION_CAP',p.positionEffect==='CLOSE'||maxLoss+ownedExposure+pendingAsset<=sleeve.currentEquity*config.maxPositionPercent/100);
     const symbolExposure=[...this.ledger.listPositions(),...this.ledger.legacyPositions()].filter(v=>v.symbol===(p.underlying??p.symbol)).reduce((n,v)=>n+v.marketValue,0);
-    check('LEGACY_TICKER_CAP',p.positionEffect==='CLOSE'||symbolExposure+maxLoss<=account.netAccountValue*legacy.maxTickerExposurePercent/100);
+    check('LEGACY_TICKER_CAP',p.positionEffect==='CLOSE'||symbolExposure+pendingTicker+maxLoss<=account.netAccountValue*legacy.maxTickerExposurePercent/100);
     check('SECTOR_VERIFIED',closing||this.db.getMode()==='SIMULATION'||!!q.sector);
     const sector=[...this.ledger.listPositions(),...this.ledger.legacyPositions()].filter(v=>v.sector===(q.sector??'Unknown')||v.strategyId==='LEGACY'&&v.sector==='Unknown').reduce((n,v)=>n+v.marketValue,0);
     check('LEGACY_SECTOR_CAP',p.positionEffect==='CLOSE'||sector+maxLoss<=account.netAccountValue*legacy.maxSectorExposurePercent/100);
@@ -206,7 +211,7 @@ export class ProposalService {
     check('SLEEVE_ORDER_LIMIT',sleeveOrders.n<config.maxTradesPerDay);
     check('SLEEVE_POSITION_LIMIT',p.positionEffect==='CLOSE'||!!position||sleeve.positions.length+sleeve.options.length<config.maxSimultaneousPositions);
     check('MAX_ALLOCATION_DIRECTIVE',directives.filter(d=>d.type==='MAX_ALLOCATION').every(d=>{const a=JSON.parse(d.value_json) as {maxAmount?:number};return a.maxAmount===undefined||notional<=a.maxAmount;}));
-    check('SLEEVE_POSITION_RISK',p.positionEffect==='CLOSE'||maxLoss+(p.option?0:position?.marketValue??0)<=sleeve.currentEquity*sleevePolicy.maxPositionRiskPercent/100);
+    check('SLEEVE_POSITION_RISK',p.positionEffect==='CLOSE'||maxLoss+ownedExposure+pendingAsset<=sleeve.currentEquity*sleevePolicy.maxPositionRiskPercent/100);
     check('CASH_COLLATERAL',cashRequired<=sleeve.availableCapital&&cashRequired<=account.buyingPower&&account.cash-cashRequired>=policy.minimumCashReserve);
     const gross=SLEEVES.reduce((n,s)=>n+this.allocation.state(s).capitalAtRisk,0)+this.ledger.legacyPositions().reduce((n,p)=>n+p.marketValue,0);
     const pendingGross=this.db.raw.prepare("SELECT COALESCE(SUM(cash_amount),0) AS total FROM capital_reservations WHERE status='ACTIVE'").get() as {total:number};
