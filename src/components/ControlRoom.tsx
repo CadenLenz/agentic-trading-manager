@@ -110,7 +110,7 @@ export function ControlRoom({ initial, onLogout }: { initial: Dashboard; onLogou
 
       <nav aria-label="Main navigation">{primary.map(id=>nav.find(n=>n.id===id)!).map(item=>{const Icon=item.icon;return <button key={item.id} aria-current={view===item.id?'page':undefined} className={view===item.id?'active':''} onClick={()=>navigate(item.id)}><Icon size={19}/><span>{item.label}</span></button>;})}<button aria-current={inMore?'page':undefined} className={inMore?'active':''} onClick={()=>navigate('more')}><MoreHorizontal size={19}/><span>More</span></button></nav>
 
-      <div className="rail-shortcuts"><span className="card-kicker">WORKSPACE</span><button onClick={()=>navigate('trading')}><ShieldAlert size={16}/>Trade reviews</button><button onClick={()=>navigate('connections')}><Wifi size={16}/>Connections</button></div>
+      <div className="rail-shortcuts"><span className="card-kicker">WORKSPACE</span><button onClick={()=>navigate('acceptance')}><Play size={16}/>Autonomous trading</button><button onClick={()=>navigate('trading')}><ShieldAlert size={16}/>Trade reviews</button><button onClick={()=>navigate('connections')}><Wifi size={16}/>Connections</button></div>
 
       <div className="rail-status"><div><span className={`live-dot ${dashboard.health.status}`} /><b>{dashboard.health.ready?'Manager online':'Needs attention'}</b></div><button className="rail-logout" onClick={()=>void onLogout()}><LogOut size={15}/> Log out</button></div>
 
