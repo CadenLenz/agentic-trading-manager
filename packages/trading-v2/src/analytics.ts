@@ -20,17 +20,17 @@ export class PortfolioAnalytics{
   series(period='1D',strategy?:string,instrument?:string){
     const days:Record<string,number>={'1D':1,'1W':7,'1M':31,'3M':93,'1Y':366,ALL:36500};if(!(period in days))throw new Error('Unsupported chart period');
     const mode=this.db.getMode(),account=mode==='SIMULATION'?'SIMULATION':this.db.getSetting<{accountId:string}|null>('broker_account_v2',null)?.accountId??'UNVERIFIED',since=this.verifiedSince(new Date(Date.now()-days[period]!*86400000).toISOString(),mode,account);
-    let rows:Array<{at:string;value:number}>;
-    if(instrument)rows=this.db.raw.prepare('SELECT s.created_at AS at,s.value FROM position_snapshots s JOIN portfolio_snapshots p ON p.id=s.portfolio_id WHERE p.mode=? AND p.account_id=? AND s.created_at>=? AND s.strategy_id=? AND s.instrument_id=? ORDER BY s.created_at').all(mode,account,since,strategy,instrument) as typeof rows;
-    else if(strategy)rows=this.db.raw.prepare('SELECT s.created_at AS at,s.equity AS value FROM strategy_snapshots s JOIN portfolio_snapshots p ON p.id=s.portfolio_id WHERE p.mode=? AND p.account_id=? AND s.created_at>=? AND s.strategy_id=? ORDER BY s.created_at').all(mode,account,since,strategy) as typeof rows;
-    else rows=this.db.raw.prepare('SELECT created_at AS at,equity AS value FROM portfolio_snapshots WHERE mode=? AND account_id=? AND created_at>=? ORDER BY created_at').all(mode,account,since) as typeof rows;
+    let rows:Array<{at:string;value:number;price?:number}>;
+    if(instrument)rows=this.db.raw.prepare('SELECT s.created_at AS at,s.value,s.mark AS price FROM position_snapshots s JOIN portfolio_snapshots p ON p.id=s.portfolio_id WHERE (p.mode=\'SIMULATION\')=? AND p.account_id=? AND s.created_at>=? AND s.strategy_id=? AND s.instrument_id=? ORDER BY s.created_at').all(mode==='SIMULATION'?1:0,account,since,strategy,instrument) as typeof rows;
+    else if(strategy)rows=this.db.raw.prepare('SELECT s.created_at AS at,s.equity AS value FROM strategy_snapshots s JOIN portfolio_snapshots p ON p.id=s.portfolio_id WHERE (p.mode=\'SIMULATION\')=? AND p.account_id=? AND s.created_at>=? AND s.strategy_id=? ORDER BY s.created_at').all(mode==='SIMULATION'?1:0,account,since,strategy) as typeof rows;
+    else rows=this.db.raw.prepare('SELECT created_at AS at,equity AS value FROM portfolio_snapshots WHERE (mode=\'SIMULATION\')=? AND account_id=? AND created_at>=? ORDER BY created_at').all(mode==='SIMULATION'?1:0,account,since) as typeof rows;
     const stride=Math.max(1,Math.ceil(rows.length/500)),points=rows.filter((_,i)=>i%stride===0||i===rows.length-1);
     return {period,points,simulated:mode==='SIMULATION',coverage:'RECORDED_SNAPSHOTS_ONLY',firstObserved:rows[0]?.at??null,source:'Attributed ledger equity; not underlying price history'};
   }
   performance(since:string){
     const mode=this.db.getMode(),account=mode==='SIMULATION'?'SIMULATION':this.db.getSetting<{accountId:string}|null>('broker_account_v2',null)?.accountId??'UNVERIFIED';
     since=this.verifiedSince(since,mode,account);
-    const rows=this.db.raw.prepare('SELECT equity,external_flow,created_at FROM portfolio_snapshots WHERE mode=? AND account_id=? AND created_at>=? ORDER BY created_at').all(mode,account,since) as Array<{equity:number;external_flow:number;created_at:string}>;
+    const rows=this.db.raw.prepare('SELECT equity,external_flow,created_at FROM portfolio_snapshots WHERE (mode=\'SIMULATION\')=? AND account_id=? AND created_at>=? ORDER BY created_at').all(mode==='SIMULATION'?1:0,account,since) as Array<{equity:number;external_flow:number;created_at:string}>;
     if(rows.length<2)return {beginning:null,end:rows.at(-1)?.equity??null,pnl:null,returnPercent:null,coverage:'INSUFFICIENT_SNAPSHOTS'};
     const beginning=rows[0]!.equity,end=rows.at(-1)!.equity,flow=rows.slice(1).reduce((n,r)=>n+r.external_flow,0),pnl=roundMoney(end-beginning-flow);
     return {beginning,end,externalFlow:flow,pnl,returnPercent:beginning?100*pnl/beginning:null,coverage:'SINCE_FIRST_RECORDED_SNAPSHOT',firstObserved:rows[0]!.created_at};

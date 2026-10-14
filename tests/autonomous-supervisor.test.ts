@@ -13,6 +13,13 @@ function fixture(){
   return {db,snapshot,callbacks,supervisor,tick:async(minutes=0)=>{now=new Date(start.getTime()+minutes*60000);await supervisor.tick(now);},setTaskStatus:(s:SupervisorTaskStatus)=>{taskStatus=s;}};
 }
 describe('deterministic autonomous supervisor',()=>{
+  it('rechecks held options periodically and reacts to exits during the ordinary cooldown',async()=>{
+    const f=fixture();await f.tick();await f.tick(.25);await f.tick(.5);
+    f.snapshot.sleeves.OPTIONS.materialEvents=['option:STOP_THRESHOLD'];await f.tick(1);
+    expect(f.callbacks.createReasoning).toHaveBeenLastCalledWith(expect.objectContaining({sleeve:'OPTIONS',reason:'Material risk, thesis, news or catalyst event'}));
+    const count=vi.mocked(f.callbacks.createReasoning).mock.calls.length;await f.tick(1.25);expect(f.callbacks.createReasoning).toHaveBeenCalledTimes(count);
+    await f.tick(21);expect(f.callbacks.createReasoning).toHaveBeenLastCalledWith(expect.objectContaining({sleeve:'OPTIONS',reason:'Scheduled market review'}));
+  });
   it('prioritizes options, manages holdings first and deduplicates unchanged state across ticks/restart',async()=>{
     const f=fixture();await f.tick();
     expect(f.callbacks.createReasoning).toHaveBeenCalledTimes(1);

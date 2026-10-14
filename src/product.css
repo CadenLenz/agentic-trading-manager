@@ -580,3 +580,9 @@ input,textarea,select { border:1px solid var(--line-bright); border-radius:7px; 
 .opening-holdings, .opening-cash { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; margin:20px 0; }
 .reconciliation-page .field { margin:16px 0; }
 .reconciliation-page .plain-facts { margin-bottom:0; }
+@media(max-width:600px) {
+  .overview-top { align-items:stretch; }
+  .account-experience, .overview-top, .overview-bottom, .account-hero, .overview-companion { width:100%; min-width:0; }
+  .holding-value { text-align:right; font-variant-numeric:tabular-nums; }
+  .account-hero .equity-chart, .account-hero .chart-empty { min-height:175px; }
+}

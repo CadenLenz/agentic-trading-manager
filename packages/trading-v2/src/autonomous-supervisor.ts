@@ -112,7 +112,6 @@ export class AutonomousSupervisor {
     if(sleeve!=='SAFE_LONG_TERM'&&close-at<=30*60000&&close>at&&old.lastClosingDate!==snapshot.market.date)return 'End of session position review';
     const nearExpiry=positions.some(p=>p.expiresAt&&Date.parse(p.expiresAt)-at<=config.nearExpiryDays*86400000);
     const interval=nearExpiry||current.orders.some(o=>!terminalOrder(o.status))?Math.max(config.cooldownMinutes,Math.min(config.reviewMinutes,10)):config.reviewMinutes;
-    if(sleeve==='OPTIONS'&&!nearExpiry&&positions.length>0)return null; // Material changes above trigger decisions; unchanged held options need polling, not another model call.
     if(at-Date.parse(old.lastAnalysisAt)>=interval*60000)return nearExpiry?'Approaching option expiry review':'Scheduled market review';
     return null;
   }
@@ -171,8 +170,9 @@ export class AutonomousSupervisor {
       for(const sleeve of [...SLEEVES].reverse()){
         const old=state.sleeves[sleeve],c=config[sleeve];
         if(this.blockReason(snapshot,sleeve,c,at)||!snapshot.market.open)continue;
-        if(old.lastAnalysisAt&&at-Date.parse(old.lastAnalysisAt)<c.cooldownMinutes*60000)continue;
         const reason=this.reason(sleeve,snapshot.sleeves[sleeve],old,c,snapshot,at);if(!reason)continue;
+        const urgent=['Position exposure changed','Broker order or fill state changed','Material risk, thesis, news or catalyst event'].includes(reason);
+        if(!urgent&&old.lastAnalysisAt&&at-Date.parse(old.lastAnalysisAt)<c.cooldownMinutes*60000)continue;
         if(!await this.callbacks.workerAvailable()){
           for(const s of SLEEVES)if(state.sleeves[s].status==='AUTONOMOUS'){state.sleeves[s].status='BLOCKED';state.sleeves[s].reason='Codex unavailable; deterministic monitoring continues';}
           return;
