@@ -90,7 +90,7 @@ describe('deterministic autonomous supervisor',()=>{
     expect(claimed).toBeTruthy();expect(f.supervisor.state().sleeves.OPTIONS.lastTaskStatus).toBe('UNKNOWN');
     f.setTaskStatus('RUNNING');await f.tick(30);expect(f.callbacks.createReasoning).toHaveBeenCalledTimes(1);
     vi.mocked(f.callbacks.reconcile).mockRejectedValue(new Error('broker disconnected'));await f.tick(31);
-    expect(f.db.getSetting('global_pause')).toBe(true);expect(f.callbacks.onFault).toHaveBeenCalledTimes(1);
+    expect(f.db.getSetting('global_pause')).toBe(false);expect(f.db.getSetting('reconciliation_clear')).toBe(false);expect(f.callbacks.onFault).toHaveBeenCalledTimes(1);
     expect(f.supervisor.state().sleeves.OPTIONS.status).toBe('BLOCKED');
   });
   it('generates daily and weekly reports once without consuming Codex',async()=>{

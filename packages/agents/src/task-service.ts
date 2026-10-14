@@ -8,6 +8,7 @@ import {classify,taskInput,taskResponse,taskSettings,defaultSettings,taskType,au
 import {WorkerClient,type WorkerTransport} from './worker-client.js';
 import type {WorkerJob} from './worker.js';
 import {autonomousAuthorized,revokeAutonomy} from '../../trading-v2/src/autonomy.js';
+import {supervisorConfigSchema,DEFAULT_SUPERVISOR_CONFIG,type SupervisorConfig} from '../../trading-v2/src/autonomous-supervisor.js';
 
 export interface AppTask extends WorkerJob{actor:string;source:'MANUAL'|'SCHEDULED'|'AUTONOMOUS';type:TaskInput['type'];authority:TaskInput['authority'];strategy:TaskInput['strategy'];message:string;templateVersion:string;appStateVersion:string;settings:TaskInput['settings'];result:unknown;applied:boolean;dispatched:boolean;executionAttempted?:boolean}
 export const scheduleInput=z.object({name:z.string().min(1).max(100),message:z.string().min(1).max(12000),type:taskType,authority:authority.exclude(['CONFIGURE_PROPOSAL']),strategy:sleeveSchema.nullable(),intervalMinutes:z.number().int().min(15).max(10080),enabled:z.boolean(),timeoutMs:z.number().int().min(10000).max(600000)}).strict();
@@ -38,11 +39,13 @@ export class CodexTaskService{
       proposals:this.proposals.list().filter(p=>!task.strategy||p.strategy===task.strategy).slice(0,10),
       recentReports:/REPORT/.test(task.type)?this.db.raw.prepare('SELECT * FROM trading_reports ORDER BY created_at DESC LIMIT 3').all():[],
       strategyBehavior:Object.fromEntries(strategies.map(s=>[s,this.db.getSetting('strategy_behavior:'+s,{manageExistingFirst:true})])),
-      limitations:'Codex can only create local drafts and structured rules. The deterministic application alone authorizes and executes trades under persisted operator autonomy and fresh risk checks. A trade draft should include research with all required categories and actual observed sources, simulated=false. Never invent evidence.'});
+      supervision:this.db.getSetting('autonomous_supervisor_config_v1',DEFAULT_SUPERVISOR_CONFIG),activeOrders:this.db.raw.prepare("SELECT e.proposal_id,json_extract(e.order_json,'$.strategy') AS strategy,e.broker_order_id,o.quantity,o.cumulative_filled_quantity,o.status FROM executions_v2 e JOIN orders o ON o.id=e.order_id WHERE o.status IN ('SUBMITTED','PARTIALLY_FILLED') LIMIT 50").all(),
+      limitations:'Codex can only create local drafts and structured rules. The deterministic application alone authorizes and executes trades under persisted operator autonomy and fresh risk checks. An entry draft must include current actual observed sources, simulated=false. Missing category coverage is a warning; never invent missing news or historical basis. Never invent evidence.'});
   }
   async status(){try{return {...await this.worker.health(),lastSuccess:this.list().find(j=>j.status==='COMPLETED')?.endedAt??null,lastError:this.list().find(j=>j.error)?.error??null,settings:this.settings()};}catch{return {installed:false,loggedIn:false,usable:false,version:null,compatible:false,robinhood:{configured:false,status:'Unavailable'},active:0,queued:this.list().filter(j=>j.status==='QUEUED').length,lastSuccess:this.list().find(j=>j.status==='COMPLETED')?.endedAt??null,lastError:'Local Codex worker unavailable. Dashboard and safety controls remain available.',settings:this.settings()};}}
   async cancel(id:string,actor:string){const task=this.get(id);if(!['QUEUED','RUNNING'].includes(task.status))return task;task.status='CANCELLED';task.endedAt=nowIso();this.save(task);this.db.audit(actor,'CODEX_TASK_CANCELLED','codex_task',id,{});if(task.dispatched)try{await this.worker.cancel(id);}catch{/* app will never apply cancelled output */}return task;}
   private accept(task:AppTask,job:WorkerJob){if(job.id!==task.id)throw new Error('Worker task identity mismatch');if(this.get(task.id).status==='CANCELLED')return;
+    if(job.status==='BLOCKED_USAGE_LIMIT')this.db.setSetting('codex_usage_retry_after_v1',Date.now()+3600000);
     Object.assign(task,job);if(task.status==='COMPLETED'&&!task.applied){
       try{const response=taskResponse.parse(task.response);const input=taskInput.parse({id:task.id,message:task.message,type:task.type,authority:task.authority,strategy:task.strategy,context:'',settings:task.settings});validateAuthority(input,response);
         this.db.raw.transaction(()=>{const a=response.action;
@@ -51,8 +54,10 @@ export class CodexTaskService{
           else if(a?.intent==='configure_strategies'){
             if(task.source!=='MANUAL')throw new Error('Scheduled reasoning cannot edit policy');
             if(new Set(a.rules.map(r=>r.strategy)).size!==a.rules.length)throw new Error('Duplicate strategy rules');
-            for(const rule of a.rules){const objective=rule.strategy==='SAFE_LONG_TERM'?'LONG_TERM_QUALITY':rule.strategy==='OPTIONS'?'ACTIVE_LEVEL2_OPTIONS':'SWING_MOMENTUM';if(rule.objective!==objective)throw new Error('Strategy objective mismatch');this.db.setSetting('strategy_behavior:'+rule.strategy,rule);const service=new RiskConfigurationService(this.db),current=service.current();current.config.strategies[rule.strategy]={...current.config.strategies[rule.strategy],allowedSymbols:rule.allowedSymbols,perTradeRiskPercent:rule.maxPortfolioRiskPercent,maxPositionPercent:rule.maxPortfolioRiskPercent,...(rule.objective==='LONG_TERM_QUALITY'?{minMarketCap:10000000000,earningsTradingAllowed:true}:{})};service.apply(current.config,current.version,task.actor,'Validated operator strategy instruction: '+rule.reason,'APPLY RISK CONFIGURATION',{instruction:task.message,interpretation:response.message,sessionId:task.id});}
-            task.result={rules:a.rules,persisted:true};
+            for(const rule of a.rules){const objective=rule.strategy==='SAFE_LONG_TERM'?'LONG_TERM_QUALITY':rule.strategy==='OPTIONS'?'ACTIVE_LEVEL2_OPTIONS':'SWING_MOMENTUM';if(rule.objective!==objective)throw new Error('Strategy objective mismatch');const service=new RiskConfigurationService(this.db),current=service.current();current.config.strategies[rule.strategy]={...current.config.strategies[rule.strategy],allowedSymbols:rule.allowedSymbols,perTradeRiskPercent:rule.maxPortfolioRiskPercent,maxPositionPercent:rule.maxPortfolioRiskPercent,...(rule.objective==='LONG_TERM_QUALITY'?{minMarketCap:10000000000,earningsTradingAllowed:true}:{})};service.apply(current.config,current.version,task.actor,'Validated operator strategy instruction: '+rule.reason,'APPLY RISK CONFIGURATION',{instruction:task.message,interpretation:response.message,sessionId:task.id});}
+            const schedules=this.db.getSetting<Record<string,SupervisorConfig>>('autonomous_supervisor_config_v1',DEFAULT_SUPERVISOR_CONFIG);
+            for(const rule of a.rules){const before=schedules[rule.strategy]??DEFAULT_SUPERVISOR_CONFIG[rule.strategy];schedules[rule.strategy]=supervisorConfigSchema.parse({...before,...(rule.reviewMinutes===null?{}:{reviewMinutes:rule.reviewMinutes,cooldownMinutes:Math.min(before.cooldownMinutes,rule.reviewMinutes)}),...(rule.monitorSeconds===null?{}:{monitorSeconds:rule.monitorSeconds}),...(rule.activeOrderPollSeconds===null?{}:{activeOrderPollSeconds:rule.activeOrderPollSeconds})});const previous=this.db.getSetting<Record<string,unknown>>('strategy_behavior:'+rule.strategy,{});this.db.setSetting('strategy_behavior:'+rule.strategy,{...previous,...rule,summary:response.message,openNewPositions:rule.openNewPositions??previous.openNewPositions??true,extremeIvThreshold:rule.extremeIvThreshold??previous.extremeIvThreshold??null,extremeIvSizeMultiplier:rule.extremeIvSizeMultiplier??previous.extremeIvSizeMultiplier??null});}
+            this.db.setSetting('autonomous_supervisor_config_v1',schedules);task.result={rules:a.rules,persisted:true,summary:response.message};
           }
           else if(a?.intent==='risk_change_proposal'){
             const service=new RiskConfigurationService(this.db),context={reason:a.reason,instruction:task.message,interpretation:response.message,sessionId:task.id};
@@ -60,6 +65,7 @@ export class CodexTaskService{
             else task.result=service.propose(a.changes,task.actor,context);
           }
           else if(a?.intent==='create_trade_proposal'){const p=this.proposals.create(a.proposal,task.actor);if(a.research)this.proposals.research(p.id,a.research,task.actor);task.result=this.proposals.get(p.id);}
+          else if(a?.intent==='manage_order'){const p=this.proposals.get(a.proposalId);if(p.strategy!==a.strategy||!['BROKER_ACCEPTED','PARTIALLY_FILLED'].includes(p.state))throw new Error('Management requires an attributed open order in the target sleeve');task.result={id:p.id,management:a};}
           else if(a?.intent==='run_full_simulation')task.result=this.runSimulation(task.actor);
           task.applied=true;task.hash=stableHash(response);this.save(task);this.db.audit(task.actor,'CODEX_TASK_COMPLETED','codex_task',task.id,{hash:task.hash,action:a,result:task.result,authority:task.authority});
         })();
@@ -68,13 +74,21 @@ export class CodexTaskService{
     if(task.status!=='RUNNING'&&task.status!=='QUEUED'&&task.status!=='COMPLETED')this.db.audit(task.actor,'CODEX_TASK_'+task.status,'codex_task',task.id,{error:task.error});
   }
   async tick(){if(this.busy||this.stopped)return;this.busy=true;try{this.tickSchedules();for(const task of this.list().reverse().filter(j=>['QUEUED','RUNNING'].includes(j.status))){
+    if(!task.dispatched&&Date.now()<this.db.getSetting<number>('codex_usage_retry_after_v1',0)){task.status='BLOCKED_USAGE_LIMIT';task.error='Codex usage unavailable; no dispatch. Automatic reasoning retries after '+new Date(this.db.getSetting<number>('codex_usage_retry_after_v1')).toISOString();this.save(task);continue;}
     try{if(!task.dispatched){const input=taskInput.parse({id:task.id,message:task.message,type:task.type,authority:task.authority,strategy:task.strategy,context:this.context(task),settings:task.settings});task.dispatched=true;task.startedAt=nowIso();this.save(task);this.accept(task,await this.worker.enqueue(input));}else this.accept(task,await this.worker.get(task.id));}
     catch(error){task.status='UNKNOWN';task.error='Worker unavailable or dispatch outcome uncertain; task will not be replayed. '+String(error).slice(0,300);task.endedAt=nowIso();this.save(task);this.db.audit(task.actor,'CODEX_TASK_UNKNOWN','codex_task',task.id,{error:task.error});}
   }
     for(const task of this.list().filter(t=>(t.source==='AUTONOMOUS'||t.authority==='TRADE_PROPOSAL'&&this.db.getMode()==='AUTONOMOUS_LIVE')&&t.status==='COMPLETED'&&t.applied&&!t.executionAttempted)){
       task.executionAttempted=true;this.save(task);
-      const id=(task.result as {id?:string}|null)?.id;if(!id||!task.strategy||!autonomousAuthorized(this.db,task.strategy))continue;
-      try{const p=this.proposals.get(id);if(p.state!=='RESEARCHED')throw new Error('Current complete sourced research required before autonomous execution');
+      let id=(task.result as {id?:string}|null)?.id;const sleeve=task.strategy??(id?this.proposals.get(id).strategy:null);if(!id||!sleeve||!autonomousAuthorized(this.db,sleeve))continue;
+      try{const management=task.response?.action;if(management?.intent==='manage_order'){
+          const original=this.proposals.get(id);await this.proposals.cancel(id,'AUTONOMOUS_POLICY_ENGINE');const reconciled=await this.proposals.reconcile();if(this.proposals.get(id).state!=='CANCELLED'||!reconciled.clear)throw new Error('Replacement waits for confirmed cancellation and reconciled fills');
+          if(management.operation==='CANCEL'){task.result=this.proposals.detail(id);this.save(task);continue;}
+          const replacement=management.replacement,execution=this.db.raw.prepare('SELECT order_id FROM executions_v2 WHERE proposal_id=?').get(id) as {order_id:string},order=this.db.raw.prepare('SELECT quantity,cumulative_filled_quantity FROM orders WHERE id=?').get(execution.order_id) as {quantity:number;cumulative_filled_quantity:number};
+          if(!replacement||replacement.strategy!==original.strategy||replacement.symbol!==original.symbol||replacement.side!==original.side||replacement.positionEffect!==original.positionEffect||replacement.assetClass!==original.assetClass||replacement.option?.optionId!==original.option?.optionId||replacement.quantity>order.quantity-order.cumulative_filled_quantity+.000001)throw new Error('Replacement must retain instrument/ownership and cannot exceed verified remaining quantity');
+          const next=this.proposals.create({...replacement,thesis:original.thesis,invalidation:original.invalidation,exitPlan:original.exitPlan},task.actor);if(management.research)this.proposals.research(next.id,management.research,task.actor);this.db.audit(task.actor,'AUTONOMOUS_ORDER_REPLACEMENT','proposal',next.id,{replaces:id,reason:management.reason});id=next.id;
+        }
+        const p=this.proposals.get(id);if(p.state!=='RESEARCHED'&&!(p.state==='DRAFT'&&p.positionEffect==='CLOSE'))throw new Error('Current complete sourced research required before autonomous entry');
         await this.proposals.review(id,'AUTONOMOUS_POLICY_ENGINE');
         if(this.proposals.get(id).state==='READY_TO_EXECUTE')await this.proposals.execute(id,'AUTONOMOUS_POLICY_ENGINE','AUTONOMOUS');
         task.result=this.proposals.detail(id);this.save(task);

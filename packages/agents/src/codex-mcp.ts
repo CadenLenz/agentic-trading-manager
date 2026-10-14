@@ -67,7 +67,7 @@ export class CodexMcpTransport implements BrokerTransport {
   private async rpc(name:string,args:Record<string,unknown>){
     await this.start();const tool=this.tools.find(t=>t.name===name);if(!tool||!new Ajv({strict:false}).compile(tool.inputSchema)(args))throw new Error('Broker arguments do not match the discovered schema');
     const result=await this.request('mcpServer/tool/call',{threadId:this.threadId,server:'robinhood-trading',tool:name,arguments:args}) as BrokerResult;
-    if(result.isError)throw new Error('Robinhood read or preview failed');
+    if(result.isError){const login=/unauthoriz|authentication|login|log in|token.*expir|401/i.test(JSON.stringify(result.content));this.close();throw new Error(login?'ROBINHOOD LOGIN REQUIRED':'Robinhood read or preview failed');}
     if(tool.outputSchema&&(!result.structuredContent||!new Ajv({strict:false}).compile(tool.outputSchema)(result.structuredContent)))throw new Error('Broker output does not match the discovered schema');
     return result;
   }

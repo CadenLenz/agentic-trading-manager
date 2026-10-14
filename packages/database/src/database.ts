@@ -333,7 +333,7 @@ export class AppDatabase {
     this.raw.pragma('foreign_keys = ON');
     this.raw.pragma('busy_timeout = 5000');
     if (path !== ':memory:') this.raw.pragma('journal_mode = WAL');
-    this.raw.pragma('synchronous = NORMAL');
+    this.raw.pragma('synchronous = FULL'); // Durable intent must precede every external order transmission.
   }
 
   migrate(): void {

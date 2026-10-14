@@ -1,10 +1,11 @@
 import type {AppDatabase} from '../../database/src/database.js';
 import type {Sleeve,TradingAccount} from './model.js';
-import {manualLiveChecks} from './manual-live.js';
 import {nowIso,makeId} from '../../core/src/utils.js';
 
 export interface AutonomousAuthorization {id:string;accountId:string;actor:string;at:string;review:string}
 export const liveMode=(mode:string)=>['LIVE','MANUAL_LIVE','AUTONOMOUS_LIVE'].includes(mode);
+export function suspendAutonomy(db:AppDatabase,reason:string){db.setSetting('reconciliation_clear',false);db.setSetting('autonomous_runtime_block',reason);}
+export function sleeveExecutionBlocked(db:AppDatabase,strategy:Sleeve){return !!db.raw.prepare("SELECT proposal_id FROM executions_v2 WHERE (status='UNKNOWN_OUTCOME' OR (status='PENDING' AND broker_order_id IS NULL)) AND (json_extract(order_json,'$.strategy')=? OR json_extract(order_json,'$.strategy') IS NULL) LIMIT 1").get(strategy);}
 export function revokeAutonomy(db:AppDatabase,reason:string){
   if(db.getSetting('autonomous_authorization_v1',null))db.audit('SAFETY','AUTONOMY_REVOKED','system',null,{reason});
   db.setSetting('autonomous_authorization_v1',null);
@@ -13,11 +14,8 @@ export function revokeAutonomy(db:AppDatabase,reason:string){
   if(liveMode(db.getMode()))db.setSetting('operating_mode','READ_ONLY');
 }
 export function autonomyChecks(db:AppDatabase){
-  const {manualApprovalOnly:_,pauseReleased:__,...checks}=manualLiveChecks(db);
-  void _;void __;
-  // Configuration is validated on every order; the isolated smoke is release evidence.
-  const smoke=db.getSetting<{sha:string}|null>('manual_live_safety_evidence',null);
-  return {...checks,noLatchedSleeveStops:!db.raw.prepare('SELECT strategy_id FROM strategy_capital WHERE killed=1 LIMIT 1').get(),deterministicRiskHealthy:!!smoke&&smoke.sha===(process.env.APP_GIT_SHA??'local')};
+  const a=db.getSetting<TradingAccount|null>('broker_account_v2',null);
+  return {correctAccount:!!a&&a.agentic&&a.complete&&a.accountId===process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID,freshAccount:!!a&&a.healthy&&Date.now()-Date.parse(a.asOf)>=-5000&&Date.now()-Date.parse(a.asOf)<60000,cleanReconciliation:db.getSetting('reconciliation_clear',false),noBorrowing:!!a&&a.cash>=0&&a.buyingPower>=0,emergencyStopHealthy:db.getSetting('startup_ready',false),stopReleased:!db.getSetting('stopped',false),maintenanceOff:!db.getSetting('maintenance_mode',false)};
 }
 export function authorizeAutonomy(db:AppDatabase,actor:string,review:string){
   const checks=autonomyChecks(db);if(!Object.values(checks).every(Boolean))throw new Error('Autonomous readiness blocked: '+Object.entries(checks).filter(([,ok])=>!ok).map(([k])=>k).join(', '));
@@ -37,7 +35,7 @@ export function autonomousAuthorized(db:AppDatabase,strategy:Sleeve){
   return db.getMode()==='AUTONOMOUS_LIVE'&&!!a&&a.accountId===account?.accountId&&a.accountId===process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID&&!!account?.healthy&&
     db.getSetting('startup_ready',false)&&db.getSetting('reconciliation_clear',false)&&!db.getSetting('global_pause',true)&&!db.getSetting('stopped',false)&&!db.getSetting('maintenance_mode',false)&&
     db.getSetting('v2_live_activation',false)&&db.getSetting('live_db_confirmation',false)&&!!db.getStrategy(strategy)?.enabled&&policy?.executionPolicy==='AUTONOMOUS_RISK_APPROVED'&&
-    !db.raw.prepare("SELECT proposal_id FROM executions_v2 WHERE status='UNKNOWN_OUTCOME' LIMIT 1").get()&&!db.raw.prepare('SELECT strategy_id FROM strategy_capital WHERE killed=1 LIMIT 1').get();
+    !sleeveExecutionBlocked(db,strategy)&&!db.raw.prepare('SELECT strategy_id FROM strategy_capital WHERE killed=1 AND strategy_id=? LIMIT 1').get(strategy)&&Date.now()-Date.parse(account!.asOf)>=-5000&&Date.now()-Date.parse(account!.asOf)<90000;
 }
 export function autonomousExecutionAuthorized(db:AppDatabase,id:string,version:number,hash:string,strategy:Sleeve){
   const proof=db.getSetting<{version:number;hash:string;authorizationId:string}|null>('autonomous_execution:'+id,null);

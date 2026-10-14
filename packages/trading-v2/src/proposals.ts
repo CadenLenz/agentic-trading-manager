@@ -6,12 +6,13 @@ import { StrategyAllocationManager,weekKey } from './capital.js';
 import {RiskConfigurationService} from './configuration.js';
 import {pacificPeriodStart} from './periods.js';
 import {BrokerBasisUnavailable} from './worker-broker.js';
-import {autonomousAuthorized,liveMode,revokeAutonomy} from './autonomy.js';
+import {brokerReference} from './official-orders.js';
+import {autonomousAuthorized,liveMode,revokeAutonomy,suspendAutonomy,sleeveExecutionBlocked} from './autonomy.js';
 import { DEFAULT_ACCOUNT_POLICY, accountPolicySchema, proposalSchema, researchSchema, RESEARCH_REQUIRED, SLEEVES, type Proposal, type ProposalState, type TradingBroker, type ExecutableOrder, type BrokerFill, type AgentMode } from './model.js';
 
 interface Row {id:string;version:number;state:ProposalState;body_json:string;research_json:string|null;preview_json:string|null;preview_hash:string|null;approval_json:string|null;order_id:string|null}
 export const TRANSITIONS:Partial<Record<ProposalState,ProposalState[]>>={
-  DRAFT:['RESEARCHED','CANCELLED'], RESEARCHED:['SUBMITTED_TO_RISK','DRAFT','CANCELLED'],
+  DRAFT:['RESEARCHED','SUBMITTED_TO_RISK','CANCELLED'], RESEARCHED:['SUBMITTED_TO_RISK','DRAFT','CANCELLED'],
   SUBMITTED_TO_RISK:['RISK_REJECTED','RISK_APPROVED','FAILED'],RISK_REJECTED:['DRAFT','SUBMITTED_TO_RISK','CANCELLED'],
   RISK_APPROVED:['BROKER_PREVIEWED','FAILED','CANCELLED'],BROKER_PREVIEWED:['READY_TO_EXECUTE','RISK_REJECTED','CANCELLED'],
   READY_TO_EXECUTE:['EXECUTION_SENT','RISK_REJECTED','DRAFT','CANCELLED'],EXECUTION_SENT:['BROKER_ACCEPTED','REJECTED','UNKNOWN_OUTCOME','RECONCILIATION_REQUIRED'],
@@ -26,6 +27,7 @@ export class ProposalService {
   reporter:((kind:string)=>unknown)|null=null;
   private busy=false;
   private placing=false;
+  private reconciling:Promise<{clear:boolean;mismatches:string[];account:import('./model.js').TradingAccount}>|null=null;
   constructor(readonly db:AppDatabase,readonly ledger:VirtualPortfolioLedger,readonly allocation:StrategyAllocationManager,private readonly broker:()=>TradingBroker){}
   row(id:string):Row {const r=this.db.raw.prepare('SELECT * FROM proposals WHERE id=?').get(id) as Row|undefined;if(!r)throw new Error('Proposal not found');return r;}
   get(id:string):Proposal {const r=this.row(id);return {...proposalSchema.parse(JSON.parse(r.body_json)),id:r.id,version:r.version,state:r.state};}
@@ -59,7 +61,8 @@ export class ProposalService {
   }
   research(id:string,input:unknown,actor:string){
     const p=this.get(id),r=researchSchema.parse(input);if(p.state!=='DRAFT')throw new Error('Research can only be attached to DRAFT');
-    const missing=RESEARCH_REQUIRED[p.strategy].filter(c=>!r.items.some(i=>i.category===c));if(missing.length)throw new Error('Research missing: '+missing.join(', '));
+    const missing=RESEARCH_REQUIRED[p.strategy].filter(c=>!r.items.some(i=>i.category===c));if(missing.length&&this.db.getMode()!=='AUTONOMOUS_LIVE')throw new Error('Research missing: '+missing.join(', '));
+    if(missing.length)this.db.audit(actor,'RESEARCH_COVERAGE_WARNING','proposal',id,{missing,blocking:false});
     if(this.db.getMode()!=='SIMULATION'&&r.simulated)throw new Error('Synthetic research is forbidden outside Simulation');
     this.db.raw.transaction(()=>{this.db.raw.prepare('UPDATE proposals SET research_json=? WHERE id=?').run(JSON.stringify(r),id);this.transition(id,'RESEARCHED',actor,{categories:r.items.map(i=>i.category)});})();return this.get(id);
   }
@@ -114,7 +117,8 @@ export class ProposalService {
     check('GLOBAL_PAUSE',!this.db.getSetting('global_pause',false));
     check('MAINTENANCE_STOP',!this.db.getSetting('maintenance_mode',false)&&!this.db.getSetting('stopped',false));
     check('SLEEVE_ENABLED',!!this.db.getStrategy(p.strategy)?.enabled);
-    check('RECONCILIATION',this.db.getSetting('reconciliation_clear',false)&&!this.db.getSetting('v2_migration_review_required',false));
+    check('RECONCILIATION',this.db.getSetting('reconciliation_clear',false)&&(this.db.getMode()==='AUTONOMOUS_LIVE'||!this.db.getSetting('v2_migration_review_required',false)));
+    check('NO_UNKNOWN_SLEEVE_ORDER',!sleeveExecutionBlocked(this.db,p.strategy));
     check('SLEEVE_KILL',p.positionEffect==='CLOSE'||!sleeve.killed);
     check('NORMAL_DRAWDOWN',p.positionEffect==='CLOSE'||sleeve.drawdown<Math.min(sleevePolicy.normalDrawdownPercent,this.db.getStrategy(p.strategy)!.config.maxDrawdownPercent));
     check('QUOTE',q.symbol===p.symbol&&q.price>0&&q.bid>0&&q.ask>=q.bid&&[q.price,q.bid,q.ask,q.volume].every(Number.isFinite)&&now-Date.parse(q.asOf)>=-5000&&now-Date.parse(q.asOf)<=policy.maxQuoteAgeSeconds*1000);
@@ -122,9 +126,9 @@ export class ProposalService {
     check('US_LISTED_UNLEVERAGED',this.db.getMode()==='SIMULATION'||q.usListed===true&&q.leveraged===false&&q.assetClass===p.assetClass);
     check('PROPOSAL_FRESH',now<Date.parse(p.expiresAt)&&now-Date.parse(p.createdAt)>=-5000&&now-Date.parse(p.createdAt)<=policy.maxProposalAgeSeconds*1000);
     const research=researchSchema.safeParse(JSON.parse(this.row(id).research_json??'null'));
-    check('RESEARCH_COMPLETE',research.success&&RESEARCH_REQUIRED[p.strategy].every(c=>research.data.items.some(i=>i.category===c)));
-    check('RESEARCH_FRESH',research.success&&research.data.items.every(i=>now-Date.parse(i.observedAt)>=-5000&&now-Date.parse(i.observedAt)<=policy.maxResearchAgeHours*3600000));
-    check('RESEARCH_REAL',this.db.getMode()==='SIMULATION'||(research.success&&!research.data.simulated));
+    check('RESEARCH_COMPLETE',closing||research.success&&(this.db.getMode()==='AUTONOMOUS_LIVE'||RESEARCH_REQUIRED[p.strategy].every(c=>research.data.items.some(i=>i.category===c))));
+    check('RESEARCH_FRESH',closing||research.success&&research.data.items.every(i=>now-Date.parse(i.observedAt)>=-5000&&now-Date.parse(i.observedAt)<=policy.maxResearchAgeHours*3600000));
+    check('RESEARCH_REAL',closing||this.db.getMode()==='SIMULATION'||(research.success&&!research.data.simulated));
     const session=this.db.raw.prepare('SELECT * FROM market_sessions WHERE opens_at<=? AND closes_at>?').get(nowIso(),nowIso()) as {verified_at:string}|undefined;
     check('MARKET_SESSION',this.db.getMode()==='SIMULATION'?this.db.getSetting('simulation_market_open',true):!!session&&now-Date.parse(session.verified_at)<7*86400000);
     check('SUPPORTED_ORDER',(p.orderType==='LIMIT'&&!p.option&&Number.isInteger(p.quantity)||p.orderType==='LIMIT'&&!!p.option||!p.option&&p.orderType==='MARKET')&&p.marketHours==='REGULAR'&&p.dollarAmount===null,'Official regular-hours equity market/whole-share limit and single-leg option limit orders only');
@@ -168,6 +172,9 @@ export class ProposalService {
       }
     }
     const legacy=this.db.getGlobalRisk(),config=this.db.getStrategy(p.strategy)!.config;
+    const behavior=this.db.getSetting<{openNewPositions?:boolean;maxPortfolioRiskPercent?:number;extremeIvThreshold?:number|null;extremeIvSizeMultiplier?:number|null}>('strategy_behavior:'+p.strategy,{});
+    check('ENTRIES_ENABLED',closing||behavior.openNewPositions!==false);
+    if(p.option&&!closing&&behavior.extremeIvThreshold!=null&&behavior.extremeIvSizeMultiplier!=null)check('EXTREME_IV_SIZE',q.iv!==undefined&&Number.isFinite(q.iv)&&(q.iv<behavior.extremeIvThreshold||maxLoss<=sleeve.currentEquity*(behavior.maxPortfolioRiskPercent??effective.maxSleeveCapitalPerTradePercent)/100*behavior.extremeIvSizeMultiplier));
     const pendingCount=(this.db.raw.prepare("SELECT COUNT(*) AS n FROM capital_reservations WHERE status='ACTIVE'").get() as {n:number}).n;
     check('CONFIG_PENDING_LIMIT',closing||pendingCount<effective.maxPendingOrders);
     check('CONFIG_SIZING',closing||maxLoss+(p.option?0:position?.marketValue??0)<=sleeve.currentEquity*effective.maxPositionPercent/100);
@@ -190,7 +197,7 @@ export class ProposalService {
     check('LEGACY_POSITION_CAP',p.positionEffect==='CLOSE'||maxLoss+(p.option?0:position?.marketValue??0)<=sleeve.currentEquity*config.maxPositionPercent/100);
     const symbolExposure=[...this.ledger.listPositions(),...this.ledger.legacyPositions()].filter(v=>v.symbol===(p.underlying??p.symbol)).reduce((n,v)=>n+v.marketValue,0);
     check('LEGACY_TICKER_CAP',p.positionEffect==='CLOSE'||symbolExposure+maxLoss<=account.netAccountValue*legacy.maxTickerExposurePercent/100);
-    check('SECTOR_VERIFIED',this.db.getMode()==='SIMULATION'||!!q.sector);
+    check('SECTOR_VERIFIED',closing||this.db.getMode()==='SIMULATION'||!!q.sector);
     const sector=[...this.ledger.listPositions(),...this.ledger.legacyPositions()].filter(v=>v.sector===(q.sector??'Unknown')||v.strategyId==='LEGACY'&&v.sector==='Unknown').reduce((n,v)=>n+v.marketValue,0);
     check('LEGACY_SECTOR_CAP',p.positionEffect==='CLOSE'||sector+maxLoss<=account.netAccountValue*legacy.maxSectorExposurePercent/100);
     const ownSector=sleeve.positions.filter(v=>v.sector===(q.sector??'Unknown')).reduce((n,v)=>n+v.marketValue,0);
@@ -210,14 +217,15 @@ export class ProposalService {
     const daily=this.db.raw.prepare('SELECT COUNT(*) AS n FROM orders WHERE created_at>=?').get(day.toISOString()) as {n:number};
     const minute=this.db.raw.prepare('SELECT COUNT(*) AS n FROM executions_v2 WHERE created_at>=?').get(new Date(now-60000).toISOString()) as {n:number};
     check('ORDER_RATE',daily.n<Math.min(policy.maxOrdersPerDay,legacy.maxNewTradesPerDay)&&minute.n<policy.maxOrdersPerMinute);
-    const realized=this.ledger.getRealizedPnl(undefined,day.toISOString());
-    const sleeveRealized=this.ledger.getRealizedPnl(p.strategy,day.toISOString());
-    check('CONFIG_DAILY_LOSS',closing||(realized!==null&&realized>-effective.maxDailyRealizedLoss));
+    const knownRealized=(strategy:string|null)=>{const rows=this.db.raw.prepare('SELECT strategy_id,amount FROM (SELECT strategy_id,amount,created_at FROM realized_pnl UNION ALL SELECT strategy_id,amount,created_at FROM economic_event_pnl) WHERE created_at>=?').all(day.toISOString()) as Array<{strategy_id:string;amount:number|null}>;return rows.filter(v=>strategy===null||v.strategy_id===strategy).reduce((n,v)=>n+(v.amount??0),0);};
+    const realized=this.ledger.getRealizedPnl(undefined,day.toISOString())??knownRealized(null);
+    const sleeveRealized=this.ledger.getRealizedPnl(p.strategy,day.toISOString())??knownRealized(p.strategy);
+    check('CONFIG_DAILY_LOSS',closing||realized===null||realized>-effective.maxDailyRealizedLoss);
     check('CONFIG_SLEEVE_LOSS',closing||(sleeveRealized!==null&&sleeveRealized>-effective.maxDailySleeveLoss));
     check('CONFIG_ORDER_RATE',daily.n<effective.maxOrdersPerDay&&minute.n<effective.maxOrdersPerMinute);
     check('CONFIG_NEW_POSITION_RATE',closing||(this.db.raw.prepare("SELECT COUNT(*) AS n FROM proposals WHERE strategy_id=? AND state IN ('FILLED','PARTIALLY_FILLED','BROKER_ACCEPTED') AND created_at>=? AND json_extract(body_json,'$.positionEffect')='OPEN'").get(p.strategy,day.toISOString()) as {n:number}).n<effective.maxNewPositionsPerDay);
     check('CONFIG_GROSS_NET',closing||gross+pendingGross.total+maxLoss<=account.netAccountValue*Math.min(effective.maxGrossExposurePercent,effective.maxNetExposurePercent)/100);
-    check('DAILY_REALIZED_LOSS',closing||(realized!==null&&realized>-Math.min(policy.maxDailyRealizedLoss,account.netAccountValue*legacy.maxDailyDrawdownPercent/100)));
+    check('DAILY_REALIZED_LOSS',closing||realized===null||realized>-Math.min(policy.maxDailyRealizedLoss,account.netAccountValue*legacy.maxDailyDrawdownPercent/100));
     const baseline=this.db.getSetting<{date:string;equity:number}>('daily_equity_baseline_v2',{date:day.toISOString(),equity:account.netAccountValue});
     if(baseline.date!==day.toISOString())this.db.setSetting('daily_equity_baseline_v2',{date:day.toISOString(),equity:account.netAccountValue});
     else if(!this.db.getSetting('daily_equity_baseline_v2',null))this.db.setSetting('daily_equity_baseline_v2',baseline);
@@ -250,7 +258,7 @@ export class ProposalService {
     if(this.busy)throw new Error('Trading workflow busy');this.busy=true;
     try{
       if(this.db.getMode()!=='SIMULATION')await this.reconcile();
-      const p=this.get(id);if(!['RESEARCHED','RISK_REJECTED'].includes(p.state))throw new Error('Research first; review requires RESEARCHED or RISK_REJECTED');
+      const p=this.get(id);if(!['RESEARCHED','RISK_REJECTED'].includes(p.state)&&!(p.state==='DRAFT'&&p.positionEffect==='CLOSE'))throw new Error('Research first; new entries require current sourced research');
       this.transition(id,'SUBMITTED_TO_RISK',actor);
       const r=await this.risk(id);this.transition(id,r.approved?'RISK_APPROVED':'RISK_REJECTED','RISK_ENGINE',{checks:r.checks});
       if(!r.approved)return this.detail(id);
@@ -307,7 +315,7 @@ export class ProposalService {
         return this.detail(id);
       }catch(e){
         this.ledger.updateOrder(orderId,'UNKNOWN');this.db.raw.prepare("UPDATE executions_v2 SET status='UNKNOWN_OUTCOME' WHERE proposal_id=?").run(id);this.transition(id,'UNKNOWN_OUTCOME','EXECUTION_ENGINE',{reason:e instanceof Error?e.message:'Unknown outcome'});
-        this.db.setSetting('reconciliation_clear',false);this.db.setSetting('global_pause',true);this.db.setSetting('v2_live_activation',false);this.db.setSetting('live_db_confirmation',false);revokeAutonomy(this.db,'Critical reconciliation or execution fault');throw e;
+        if(this.db.getMode()==='AUTONOMOUS_LIVE')suspendAutonomy(this.db,'Unknown execution; affected sleeve blocked, never resend');else revokeAutonomy(this.db,'Critical reconciliation or execution fault');throw e;
       }
     }finally{this.placing=false;this.busy=false;}
   }
@@ -424,6 +432,10 @@ export class ProposalService {
     this.db.audit('RECONCILIATION','OBSERVED_BROKER_CASH_CHARGE_ALLOCATED','proposal',p.id,{before,gross,verifiedBrokerCash:account.cash,charge,maximum,fillIds:missing.map(f=>f.id),allocation:'PROPORTIONAL_CONTRACTS_CENT_REMAINDER',brokerReportedPerFillFee:false});
   }
   async reconcile(){
+    if(this.reconciling)return this.reconciling;
+    this.reconciling=this.reconcileOnce();try{return await this.reconciling;}finally{this.reconciling=null;}
+  }
+  private async reconcileOnce(){
     if(this.placing){const account=this.db.getSetting<import('./model.js').TradingAccount>('broker_account_v2');return {clear:this.db.getSetting('reconciliation_clear',false),mismatches:this.db.getSetting<string[]>('reconciliation_v2',[]),account};}
     this.db.setSetting('reconciliation_clear',false);
     try{
@@ -437,7 +449,7 @@ export class ProposalService {
     // Import only attributable fills from verified scope before comparing broker ownership/cash.
     if(this.db.getMode()!=='SIMULATION'&&mismatches.length===0){
       const pending=this.db.raw.prepare("SELECT proposal_id,broker_order_id FROM executions_v2 WHERE status IN ('PENDING','UNKNOWN_OUTCOME')").all() as Array<{proposal_id:string;broker_order_id:string|null}>;
-      for(const e of pending){if(!e.broker_order_id)continue;
+      for(const e of pending){if(!e.broker_order_id){const row=this.db.raw.prepare('SELECT order_id,order_json FROM executions_v2 WHERE proposal_id=?').get(e.proposal_id) as {order_id:string;order_json:string};const client=JSON.parse(row.order_json).clientOrderId;const matches=account.orders.filter(o=>o.clientOrderId===brokerReference(client));if(!client||matches.length!==1)continue;const observed=matches[0]!;if(this.db.raw.prepare('SELECT proposal_id FROM executions_v2 WHERE broker_order_id=?').get(observed.id))continue;this.db.raw.prepare('UPDATE executions_v2 SET broker_order_id=? WHERE proposal_id=?').run(observed.id,e.proposal_id);this.ledger.updateOrder(row.order_id,'SUBMITTED',observed.id);e.broker_order_id=observed.id;this.db.audit('RECONCILIATION','UNKNOWN_EXECUTION_CLIENT_ID_MATCHED','proposal',e.proposal_id,{brokerOrderId:observed.id,clientOrderId:client,retransmitted:false});}
         const observed=account.orders.find(o=>o.id===e.broker_order_id);if(observed&&this.get(e.proposal_id).state==='UNKNOWN_OUTCOME'&&['ACCEPTED','PARTIALLY_FILLED','FILLED'].includes(observed.status)){this.transition(e.proposal_id,'BROKER_ACCEPTED','RECONCILIATION',{brokerOrderId:observed.id});this.db.raw.prepare("UPDATE executions_v2 SET status='PENDING' WHERE proposal_id=?").run(e.proposal_id);}
         for(const f of account.fills.filter(f=>f.brokerOrderId===e.broker_order_id)){if(f.fees===null){mismatches.push('Actual broker fill fees require review: '+f.id);continue;}this.applyFill(e.proposal_id,f);}
         const order=account.orders.find(o=>o.id===e.broker_order_id),p=this.get(e.proposal_id),row=this.row(e.proposal_id);
@@ -463,12 +475,14 @@ export class ProposalService {
     if(this.db.getMode()!=='SIMULATION'){
       for(const o of account.orders)if(!['FILLED','CANCELLED','REJECTED'].includes(o.status)&&!this.db.raw.prepare('SELECT id FROM executions_v2 WHERE broker_order_id=?').get(o.id))mismatches.push('Unattributed broker order '+o.id);
     }
-    this.db.setSetting('reconciliation_clear',mismatches.length===0);this.db.setSetting('last_reconciliation_at',nowIso());this.db.setSetting('broker_account_v2',account);this.db.setSetting('reconciliation_v2',mismatches);
+    const scopedOnly=this.db.getMode()==='AUTONOMOUS_LIVE'&&mismatches.length>0&&mismatches.every(x=>x.startsWith('Unknown execution outcome '));
+    const clear=mismatches.length===0||scopedOnly;
+    this.db.setSetting('reconciliation_clear',clear);this.db.setSetting('autonomous_runtime_block',clear?null:mismatches.join('; '));this.db.setSetting('last_reconciliation_at',nowIso());this.db.setSetting('broker_account_v2',account);this.db.setSetting('reconciliation_v2',mismatches);
     this.db.setSetting('broker_account_observation_v2',null);
     this.db.setSetting('broker_verification_mode_v2',this.db.getMode());
-    if(mismatches.length){this.db.setSetting('global_pause',true);this.db.setSetting('v2_live_activation',false);this.db.setSetting('live_db_confirmation',false);revokeAutonomy(this.db,'Critical reconciliation or execution fault');}
-    this.db.audit('RECONCILIATION','V2_RECONCILIATION','account',account.accountId,{mismatches});this.onEvent(mismatches.length?'RECONCILIATION_FAILURE':'RECONCILED',{accountId:account.accountId,mismatches});return {clear:mismatches.length===0,mismatches,account};
-    }catch(error){this.db.setSetting('v2_live_activation',false);this.db.setSetting('live_db_confirmation',false);revokeAutonomy(this.db,'Critical reconciliation or execution fault');this.db.setSetting('reconciliation_clear',false);this.db.setSetting('global_pause',true);
+    if(!clear){if(this.db.getMode()==='AUTONOMOUS_LIVE')suspendAutonomy(this.db,'Account reconciliation unsafe; automatic retry');else revokeAutonomy(this.db,'Critical reconciliation or execution fault');}
+    this.db.audit('RECONCILIATION','V2_RECONCILIATION','account',account.accountId,{mismatches,scopedOnly});this.onEvent(mismatches.length?'RECONCILIATION_FAILURE':'RECONCILED',{accountId:account.accountId,mismatches});return {clear,mismatches,account};
+    }catch(error){if(this.db.getMode()==='AUTONOMOUS_LIVE')suspendAutonomy(this.db,'Broker verification unavailable; automatic retry');else revokeAutonomy(this.db,'Critical reconciliation or execution fault');this.db.setSetting('reconciliation_clear',false);
       if(error instanceof BrokerBasisUnavailable){
         const a=error.observation,internal=this.ledger.aggregatePositions(),cash=SLEEVES.reduce((n,s)=>n+this.ledger.getCash(s),0);
         const differences=[error.message,...[...new Set([...internal.map(p=>p.symbol),...a.positions.map(p=>p.symbol)])].filter(symbol=>Math.abs((a.positions.find(p=>p.symbol===symbol)?.quantity??0)-(internal.find(p=>p.symbol===symbol)?.quantity??0))>.000001).map(symbol=>'Equity ownership mismatch: '+symbol)];

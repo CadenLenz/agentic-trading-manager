@@ -6,6 +6,7 @@ import {CodexMcpTransport} from '../../../packages/agents/src/codex-mcp.js';
 const directory=process.env.CODEX_WORKER_DATA??'/var/lib/agentic-codex-worker';
 mkdirSync(directory,{recursive:true,mode:0o700});
 const db=new Database(join(directory,'tasks.db'));
+db.pragma('journal_mode = WAL');db.pragma('synchronous = FULL');db.pragma('busy_timeout = 5000');
 const worker=new CodexWorker(db,process.env.CODEX_TRUSTED_DIRECTORY??process.cwd());
 const broker=new CodexMcpTransport();
 const server=workerServer(worker,broker);

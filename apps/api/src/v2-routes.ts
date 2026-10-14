@@ -35,17 +35,16 @@ export function registerV2(app:FastifyInstance,m:AgenticManager){
     requireRecentAuth(m,actor(r),r.authUser!.csrf);
     if(b.confirmation!=='ENABLE AUTONOMOUS LIVE'||(b.review?.trim().length??0)<20)throw new Error('Deliberate autonomous activation confirmation and review required');
     await m.proposals.reconcile();
-    if(SLEEVES.some(s=>m.allocation.state(s).killed))throw new Error('Review and reset latched sleeve kill switches first');
     return db.raw.transaction(()=>{
       const authorization=authorizeAutonomy(db,actor(r),b.review!);
       if(db.getSetting<{optionsLevel:number}>('broker_account_v2').optionsLevel===2)db.setSetting('global_risk',{...db.getGlobalRisk(),optionsEnabled:true});
-      for(const s of SLEEVES){const policy=m.allocation.policy(s);policy.executionPolicy='AUTONOMOUS_RISK_APPROVED';m.allocation.updatePolicy(s,policy,actor(r));db.setStrategyEnabled(s,true,actor(r),'Explicit global autonomous activation');}
+      for(const s of SLEEVES){const policy=m.allocation.policy(s);policy.executionPolicy='AUTONOMOUS_RISK_APPROVED';m.allocation.updatePolicy(s,policy,actor(r));if(!m.allocation.state(s).killed)db.setStrategyEnabled(s,true,actor(r),'Explicit global autonomous activation');}
       return {enabled:true,authorization};
     })();
   });
   app.post('/api/v2/autonomy/sleeves/:id',r=>{
     const s=sleeveSchema.parse(params(r)),b=z.object({enabled:z.boolean()}).strict().parse(r.body);
-    if(b.enabled){requireRecentAuth(m,actor(r),r.authUser!.csrf);if(m.allocation.state(s).killed)throw new Error('Sleeve kill switch remains latched');}
+    if(b.enabled){if(!db.getSetting('autonomous_authorization_v1',null))requireRecentAuth(m,actor(r),r.authUser!.csrf);if(m.allocation.state(s).killed)throw new Error('Sleeve kill switch remains latched');}
     const policy=m.allocation.policy(s);policy.executionPolicy=b.enabled?'AUTONOMOUS_RISK_APPROVED':'MANUAL_APPROVAL';m.allocation.updatePolicy(s,policy,actor(r));db.setStrategyEnabled(s,b.enabled,actor(r),'Sleeve autonomy control');return {enabled:b.enabled};
   });
   app.post('/api/v2/autonomy/config',r=>{const b=z.object({strategy:sleeveSchema,config:supervisorConfigSchema}).strict().parse(r.body);return m.autonomousSupervisor.configure(b.strategy,b.config,actor(r));});

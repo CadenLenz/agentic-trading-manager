@@ -2,6 +2,8 @@
 Description=Agentic Trading Manager
 After=network-online.target tailscaled.service
 Wants=network-online.target
+RequiresMountsFor=/opt/agentic-trading-manager /var/lib/agentic-trading-manager
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -12,6 +14,7 @@ EnvironmentFile=/etc/agentic-trading-manager/agentic-trading-manager.env
 ExecStart=/usr/bin/node /opt/agentic-trading-manager/current/dist/api/index.js
 Restart=on-failure
 RestartSec=10
+TimeoutStartSec=45
 TimeoutStopSec=30
 UMask=0077
 NoNewPrivileges=true

@@ -3,6 +3,12 @@ import {openDatabase} from '../packages/database/src/database.js';
 import {SLEEVES} from '../packages/trading-v2/src/model.js';
 const db=openDatabase(resolve(process.env.DATA_DIR??'./data','agentic-trading-manager.db'));
 try{
+  const authorization=db.getSetting<{accountId:string}|null>('autonomous_authorization_v1',null);
+  if(db.getMode()==='AUTONOMOUS_LIVE'&&authorization&&!db.getSetting('stopped',false)){
+    db.setSetting('startup_ready',false);db.setSetting('reconciliation_clear',false);
+    db.audit('UPGRADE','AUTONOMY_PRESERVED_FOR_REVALIDATION','system',null,{accountId:authorization.accountId,brokerOrdersPlaced:0});
+    process.stdout.write('Persisted autonomous configuration retained; execution waits for fresh startup reconciliation.\n');
+  }else{
   db.raw.transaction(()=>{
     db.setSetting('operating_mode','READ_ONLY');db.setSetting('global_pause',true);db.setSetting('live_db_confirmation',false);db.setSetting('v2_live_activation',false);
     db.setSetting('v2_migration_review_required',true);db.setSetting('self_tests_v2',false);db.setSetting('simulated_lifecycle_v2',false);
@@ -10,4 +16,5 @@ try{
     db.audit('UPGRADE','SAFE_UPGRADE_POSTURE','system',null,{mode:'READ_ONLY',paused:true,autonomy:'MANUAL_APPROVAL'});
   })();
   process.stdout.write('Upgrade safety posture saved: Read Only, paused, manual approvals, LIVE revoked.\n');
+  }
 }finally{db.close();}

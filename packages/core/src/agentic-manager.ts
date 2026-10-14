@@ -1,7 +1,7 @@
 import {CodexTaskService} from '../../agents/src/task-service.js';
 import {createAutonomousSupervisor} from '../../trading-v2/src/autonomous-runtime.js';
 import type {AutonomousSupervisor} from '../../trading-v2/src/autonomous-supervisor.js';
-import {revokeAutonomy,liveMode} from '../../trading-v2/src/autonomy.js';
+import {suspendAutonomy,liveMode} from '../../trading-v2/src/autonomy.js';
 import {refreshCommissioning} from '../../trading-v2/src/automatic-commissioning.js';
 import { existsSync } from 'node:fs';
 import { join,dirname } from 'node:path';
@@ -156,10 +156,10 @@ export class AgenticManager {
     this.database.setSetting('codex_reasoning_enabled',false);
     this.directives.expireDue();
     const interrupted=this.database.raw.prepare("SELECT proposal_id FROM executions_v2 WHERE status='PENDING' AND broker_order_id IS NULL").all() as Array<{proposal_id:string}>;
-    for(const e of interrupted){this.database.raw.prepare("UPDATE executions_v2 SET status='UNKNOWN_OUTCOME' WHERE proposal_id=?").run(e.proposal_id);if(this.proposals.get(e.proposal_id).state==='EXECUTION_SENT')this.proposals.transition(e.proposal_id,'UNKNOWN_OUTCOME','STARTUP',{reason:'Interrupted send; never automatically replay placement'});this.database.setSetting('global_pause',true);this.database.setSetting('reconciliation_clear',false);}
+    for(const e of interrupted){this.database.raw.prepare("UPDATE executions_v2 SET status='UNKNOWN_OUTCOME' WHERE proposal_id=?").run(e.proposal_id);if(this.proposals.get(e.proposal_id).state==='EXECUTION_SENT')this.proposals.transition(e.proposal_id,'UNKNOWN_OUTCOME','STARTUP',{reason:'Interrupted send; never automatically replay placement'});if(this.database.getMode()!=='AUTONOMOUS_LIVE')this.database.setSetting('global_pause',true);this.database.setSetting('reconciliation_clear',false);}
     const unknownOrders = this.database.raw.prepare("SELECT COUNT(*) AS count FROM orders WHERE status IN ('PENDING','SUBMITTED','PARTIALLY_FILLED','UNKNOWN')").get() as { count: number };
     if (unknownOrders.count > 0 && this.database.getMode() !== 'SIMULATION') this.database.setSetting('reconciliation_clear', false);
-    {
+    const verifyBroker=async()=>{
       try { await this.proposals.reconcile(); }
       catch (error) {
         this.database.setSetting('reconciliation_clear', false);
@@ -167,15 +167,17 @@ export class AgenticManager {
         this.database.setSetting('broker_account_v2',null);
         this.database.audit('STARTUP', 'BROKER_STARTUP_CHECK_FAILED', 'system', null, { error: error instanceof Error ? error.message : String(error) });
       }
-    }
-    if(this.database.getMode()==='AUTONOMOUS_LIVE'&&!this.database.getSetting('reconciliation_clear',false))revokeAutonomy(this.database,'Startup reconciliation failed');
+    };
+    if(this.options.startBackgroundServices===true)void verifyBroker();else await verifyBroker();
+    if(this.database.getMode()==='AUTONOMOUS_LIVE'&&!this.database.getSetting('reconciliation_clear',false))suspendAutonomy(this.database,'Startup broker verification pending');
     if (this.options.startBackgroundServices !== false) { this.jobs.start(); this.watcher.start(); this.scheduler.start(); this.codexTasks.start();this.autonomousSupervisor.start(); }
     this.ready = true; this.database.setSetting('startup_ready', true);
-    try{await refreshCommissioning(this);}catch(error){this.database.audit('READINESS','AUTOMATIC_READINESS_REFRESH_FAILED','system',null,{error:String(error)});}
+    const refresh=async()=>{try{await refreshCommissioning(this);}catch(error){this.database.audit('READINESS','AUTOMATIC_READINESS_REFRESH_FAILED','system',null,{error:String(error)});}};
+    if(this.options.startBackgroundServices===true)void refresh();else await refresh();
     this.events.publish({ type: 'SYSTEM_READY', severity: 'INFO', source: 'AGENTIC_MANAGER', payload: { mode: this.database.getMode() } });
   }
 
-  async shutdown(): Promise<void> { this.autonomousSupervisor.stop();await this.codexTasks.stop(); this.scheduler.stop(); this.watcher.stop(); this.jobs.stop(); await this.fullSimulation.shutdown(); await this.connectors.robinhood.close(); this.ready = false; this.database.setSetting('startup_ready', false); this.database.close(); }
+  async shutdown(): Promise<void> { await this.autonomousSupervisor.stop();await this.codexTasks.stop(); this.scheduler.stop(); this.watcher.stop(); this.jobs.stop(); await this.fullSimulation.shutdown(); await this.connectors.robinhood.close(); this.ready = false; this.database.setSetting('startup_ready', false); this.database.close(); }
 
   health(): HealthReport {
     const mode = this.database.getMode();

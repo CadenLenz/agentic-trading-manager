@@ -44,8 +44,8 @@ export class WorkerRobinhoodBroker implements TradingBroker {
     const equityOrders=await this.collection('get_equity_orders','orders',args),optionOrders=await this.collection('get_option_orders','orders',args);
     // Never silently discard executions/collateral we cannot yet normalize and reconcile.
     const normalizedOrders=[...equityOrders.map(o=>normalizeOfficialOrder(o)),...optionOrders.map(o=>normalizeOfficialOrder(o,true))];
-    const known=this.connection.db.raw.prepare('SELECT broker_order_id FROM executions_v2 WHERE broker_order_id IS NOT NULL').all() as Array<{broker_order_id:string}>;
-    const selectedOrders=normalizedOrders.filter(o=>!['FILLED','REJECTED','CANCELLED'].includes(o.order.status)||known.some(k=>k.broker_order_id===o.order.id));
+    const known=this.connection.db.raw.prepare('SELECT broker_order_id,order_json FROM executions_v2').all() as Array<{broker_order_id:string|null;order_json:string}>;
+    const selectedOrders=normalizedOrders.filter(o=>!['FILLED','REJECTED','CANCELLED'].includes(o.order.status)||known.some(k=>k.broker_order_id===o.order.id||!!k.order_json&&o.order.clientOrderId===brokerReference(JSON.parse(k.order_json).clientOrderId)));
     const normalizedOptions=[];
     for(const input of options){
       const p=z.object({option_id:z.string(),quantity:decimal,type:z.enum(['long','short']),average_price:decimal,trade_value_multiplier:decimal,pending_exercise_quantity:decimal,pending_assignment_quantity:decimal,pending_expiration_quantity:decimal}).parse(input);

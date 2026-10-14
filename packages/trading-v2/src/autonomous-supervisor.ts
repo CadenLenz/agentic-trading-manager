@@ -17,7 +17,7 @@ export type SupervisorConfig=z.infer<typeof supervisorConfigSchema>;
 export const DEFAULT_SUPERVISOR_CONFIG:Record<Sleeve,SupervisorConfig>={
   SAFE_LONG_TERM:{enabled:true,reviewMinutes:10080,cooldownMinutes:60,monitorSeconds:300,activeOrderPollSeconds:30,materialMovePercent:5,nearExpiryDays:0},
   AGGRESSIVE_STOCKS:{enabled:true,reviewMinutes:60,cooldownMinutes:10,monitorSeconds:120,activeOrderPollSeconds:30,materialMovePercent:3,nearExpiryDays:0},
-  OPTIONS:{enabled:true,reviewMinutes:20,cooldownMinutes:3,monitorSeconds:60,activeOrderPollSeconds:15,materialMovePercent:10,nearExpiryDays:3},
+  OPTIONS:{enabled:true,reviewMinutes:20,cooldownMinutes:3,monitorSeconds:30,activeOrderPollSeconds:15,materialMovePercent:10,nearExpiryDays:3},
 };
 export interface MonitoredPosition {
   id:string;quantity:number;price:number;underlyingPrice?:number;expiresAt?:string;
@@ -26,6 +26,7 @@ export interface MonitoredPosition {
 export interface MonitoredOrder {id:string;status:string;filledQuantity:number}
 export interface MonitoredSleeve {
   enabled:boolean;autonomous:boolean;killed:boolean;positions:MonitoredPosition[];
+  blockedReason?:string;
   orders:MonitoredOrder[];materialEvents?:string[];
 }
 export interface SupervisorSnapshot {
@@ -85,6 +86,7 @@ export class AutonomousSupervisor {
     if(snapshot.mode!=='AUTONOMOUS_LIVE')return 'Autonomy is off';
     if(!config.enabled||!s.enabled||!s.autonomous)return 'Sleeve autonomy is paused';
     if(s.killed)return 'Sleeve kill switch';
+    if(s.blockedReason)return s.blockedReason;
     if(!snapshot.reconciled||!snapshot.brokerHealthy)return 'Fresh broker reconciliation required';
     const age=at-Date.parse(snapshot.accountAsOf??'');
     if(!Number.isFinite(age)||age< -5000||age>90000)return 'Broker snapshot is stale';
@@ -105,11 +107,12 @@ export class AutonomousSupervisor {
       if(position.iv!==undefined&&previous.iv!==undefined&&Math.abs(position.iv-previous.iv)>=0.1)return 'Option implied volatility changed';
       if(position.delta!==undefined&&previous.delta!==undefined&&Math.abs(position.delta-previous.delta)>=0.15)return 'Option delta changed';
     }
-    if(sleeve!=='SAFE_LONG_TERM'&&old.lastOpeningDate!==snapshot.market.date)return 'Opening market review';
+    if(old.lastOpeningDate!==snapshot.market.date)return 'Opening market review';
     const close=Date.parse(snapshot.market.closesAt??'');
     if(sleeve!=='SAFE_LONG_TERM'&&close-at<=30*60000&&close>at&&old.lastClosingDate!==snapshot.market.date)return 'End of session position review';
     const nearExpiry=positions.some(p=>p.expiresAt&&Date.parse(p.expiresAt)-at<=config.nearExpiryDays*86400000);
     const interval=nearExpiry||current.orders.some(o=>!terminalOrder(o.status))?Math.max(config.cooldownMinutes,Math.min(config.reviewMinutes,10)):config.reviewMinutes;
+    if(sleeve==='OPTIONS'&&!nearExpiry&&positions.length>0)return null; // Material changes above trigger decisions; unchanged held options need polling, not another model call.
     if(at-Date.parse(old.lastAnalysisAt)>=interval*60000)return nearExpiry?'Approaching option expiry review':'Scheduled market review';
     return null;
   }
@@ -195,7 +198,7 @@ export class AutonomousSupervisor {
       state.lastError=null;
     }catch(error){
       const reason='Autonomous monitoring failed: '+String(error).slice(0,400);state.lastError=reason;
-      this.db.setSetting('global_pause',true);
+      this.db.setSetting('reconciliation_clear',false);
       for(const sleeve of SLEEVES){state.sleeves[sleeve].status='BLOCKED';state.sleeves[sleeve].reason=reason;}
       this.db.audit('AUTONOMOUS_SUPERVISOR','AUTONOMOUS_MONITOR_FAILED','system',null,{reason});
       await this.callbacks.onFault?.(reason);

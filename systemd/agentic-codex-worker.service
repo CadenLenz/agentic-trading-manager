@@ -2,6 +2,8 @@
 Description=Agentic Trading Manager bounded Codex worker
 After=network-online.target
 Wants=network-online.target
+RequiresMountsFor=/opt/agentic-trading-manager /var/lib/agentic-codex-worker /home/cadenlenz/.codex /etc/credstore.encrypted
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

@@ -28,7 +28,7 @@ export function AccountExperience({dashboard,section,navigate,openChat}:{dashboa
   if(!data)return <div className="panel product-card" role="status">{error||'Loading your account…'}{error&&<button onClick={()=>void load()}>Try again</button>}</div>;
   const {state,connections,summary,readiness}=data;
   const account=dashboard.simulated||state.account?.healthy&&state.account.complete?state.account:null;
-  const reconciled=dashboard.simulated||state.reconciliation.length===0;
+  const reconciled=dashboard.simulated||state.reconciliation.every(x=>x.startsWith('Unknown execution outcome '));
   const positions:Holding[]=!dashboard.simulated&&account?.positions?account.positions.map(p=>({strategy_id:reconciled?(data.positions.find(local=>local.symbol===p.symbol)?.strategy_id??'UNASSIGNED'):'UNASSIGNED',symbol:p.symbol,quantity:p.quantity,average_cost:p.averageCost,market_price:p.price})):data.positions;
   const setupSteps=[{label:'Try a safe simulation',done:!!readiness.checks.simulation,view:'simulation' as View},{label:'Connect Robinhood',done:connections.connectors.some(c=>c.id==='ROBINHOOD'&&['CONNECTED','READ_ONLY'].includes(c.state)),view:'connections' as View},{label:'Verify your read-only account',done:!!readiness.checks.readOnlyReconciliation,view:'connections' as View}];
   const next=setupSteps.find(s=>!s.done);

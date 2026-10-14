@@ -25,6 +25,11 @@ fi
 systemd-creds decrypt --name=keyring-passphrase "$credential" /dev/null
 install -d -m 0700 -o cadenlenz -g agentic-codex /var/lib/agentic-codex-worker/xdg /var/lib/agentic-codex-worker/xdg/keyrings
 install -m 0644 "$release/systemd/agentic-codex-worker.service" /etc/systemd/system/
+install -m 0644 "$release/systemd/agentic-trading-manager.service" /etc/systemd/system/
+install -d -m 0755 /etc/systemd/journald.conf.d
+install -m 0644 "$release/systemd/agentic-recovery-journal.conf" /etc/systemd/journald.conf.d/agentic-recovery.conf
+systemctl try-restart systemd-journald
+journalctl --flush
 install -d -m 0755 /etc/systemd/system/agentic-trading-manager.service.d
 cat > /etc/systemd/system/agentic-trading-manager.service.d/codex-worker.conf <<'UNIT'
 [Unit]
