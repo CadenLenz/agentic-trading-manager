@@ -1,6 +1,12 @@
 import {it,expect,vi} from 'vitest';
 import {AgenticManager} from '../packages/core/src/agentic-manager.js';
 import {refreshOptionMonitoring} from '../packages/trading-v2/src/autonomous-runtime.js';
+it('starts with no held contracts or prior option-monitor setting outside market hours',async()=>{
+  vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(new Date('2026-10-13T21:00:00Z'));
+  const m=new AgenticManager({databasePath:':memory:',workingDirectory:process.cwd(),sessionSecret:'monitor-test-secret-with-more-than-thirty-two-characters',startBackgroundServices:false});
+  try{await m.start();await m.autonomousSupervisor.tick();expect(m.autonomousSupervisor.state().lastError).toBeNull();}
+  finally{await m.shutdown();vi.useRealTimers();}
+});
 it('polls an existing contract without mutations, records market telemetry, and isolates unavailable quotes',async()=>{
   vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(new Date('2026-10-13T16:00:00Z'));
   const m=new AgenticManager({databasePath:':memory:',workingDirectory:process.cwd(),sessionSecret:'monitor-test-secret-with-more-than-thirty-two-characters',startBackgroundServices:false});
