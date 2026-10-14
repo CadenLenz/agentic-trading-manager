@@ -32,7 +32,7 @@ export function AccountExperience({dashboard,section,navigate,openChat}:{dashboa
   const account=dashboard.simulated||state.account?.healthy&&state.account.complete?state.account:null;
   const reconciled=dashboard.simulated||state.reconciliation.every(x=>x.startsWith('Unknown execution outcome '));
   const positions:Holding[]=!dashboard.simulated&&account?.positions?account.positions.map(p=>({strategy_id:reconciled?(data.positions.find(local=>local.symbol===p.symbol)?.strategy_id??'UNASSIGNED'):'UNASSIGNED',symbol:p.symbol,quantity:p.quantity,average_cost:p.averageCost,market_price:p.price})):data.positions;
-  const setupSteps=[{label:'Connect Robinhood',done:connections.connectors.some(c=>c.id==='ROBINHOOD'&&['CONNECTED','READ_ONLY'].includes(c.state)),view:'connections' as View},{label:'Verify your account',done:!!account&&account.healthy&&account.complete&&state.readiness.checks.cleanReconciliation,view:'connections' as View},{label:'Enable Autonomous Live',done:dashboard.mode==='AUTONOMOUS_LIVE',view:'acceptance' as View}];
+  const setupSteps=[{label:'Connect Robinhood',done:connections.connectors.some(c=>c.id==='ROBINHOOD'&&['CONNECTED','READ_ONLY'].includes(c.state)),view:'connections' as View},{label:'Verify your account',done:!!account&&account.healthy&&account.complete&&state.readiness.checks.correctAccount,view:'connections' as View},{label:'Enable Autonomous Live',done:dashboard.mode==='AUTONOMOUS_LIVE',view:'acceptance' as View}];
   const next=setupSteps.find(s=>!s.done);
   const selectDetail=(key:string|null)=>{setSelected(key);window.scrollTo({top:0,behavior:'instant'});};
   const pending=data.proposals.filter(p=>p.state==='READY_TO_EXECUTE').length;
