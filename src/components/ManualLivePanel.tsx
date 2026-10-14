@@ -11,9 +11,9 @@ export function ManualLivePanel({notify}:{notify:(message:string,tone?:string)=>
   const action=async(path:string,body:unknown={},message='Check recorded. No order was placed.')=>{setBusy(true);try{await post(path,body);await load();notify(message);}catch(e){notify(e instanceof Error?e.message:String(e),'danger');}finally{setBusy(false);}};
   return <div className="terminal-stack">
     <AutonomyPanel notify={notify}/>
-    <section className="panel product-card terminal-panel">
+    <details className="panel product-card terminal-panel"><summary>Advanced · Manual Live and diagnostic checks</summary>
       <p className="eyebrow">ACCOUNT & SAFETY</p><h2>Live readiness checks</h2>
-      <p>Sync the account, commission opening holdings and cash, then verify broker review, risk and STOP. These checks support both Manual Live and Autonomous Live.</p>
+      <p>Sync the account, commission opening holdings and cash, then verify broker review, risk and STOP. These historical commissioning checks apply to Manual Live. Autonomous Live automatically verifies its runtime checks above.</p>
       <div className="v2-actions"><button className="button secondary" disabled={busy} onClick={()=>void action('/api/v2/reconciliation')}>Sync and check account</button><button className="button secondary" disabled={busy} onClick={()=>void action('/api/v2/commission/check')}>Check official broker review</button><button className="button secondary" disabled={busy} onClick={()=>void action('/api/v2/self-tests')}>Check risk and STOP safety</button></div>
       <p className="muted">Broker review uses an existing holding without placing an order. Safety checks use isolated simulated money. Imported historical basis can remain unavailable; historical P&L is never invented.</p>
       <SensitiveActionAuth notify={notify}/>
@@ -25,6 +25,6 @@ export function ManualLivePanel({notify}:{notify:(message:string,tone?:string)=>
         <label className="field"><span>Type ENABLE LIVE TRADING</span><input value={confirmation} onChange={e=>setConfirmation(e.target.value)} autoComplete="off"/></label>
         <div className="v2-actions"><button className="button primary" disabled={busy||!data?.ready||confirmation!=='ENABLE LIVE TRADING'} onClick={()=>void action('/api/system/mode',{mode:'LIVE',confirmation},'Manual Live enabled. Each trade requires approval and submission.')}>Enable Manual Live</button><button className="button secondary" disabled={busy} onClick={()=>void action('/api/system/mode',{mode:'READ_ONLY'},'Read only enabled. New live orders are blocked.')}>Return to Read only</button></div>
       </details>
-    </section>
+    </details>
   </div>;
 }

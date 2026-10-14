@@ -50,7 +50,7 @@ const nav: Array<{ id: View; label: string; icon: typeof LayoutDashboard }> = [
 
   {id:'connections',label:'Setup & connections',icon:Wifi},
 
-  {id:'acceptance',label:'Pi & readiness',icon:ShieldAlert},
+  {id:'acceptance',label:'Autonomous trading',icon:ShieldAlert},
 
   { id: 'overview', label: 'Overview', icon: LayoutDashboard }, { id: 'agents', label: 'Codex', icon: Bot }, { id: 'strategies', label: 'Strategies', icon: SlidersHorizontal },
 
@@ -136,17 +136,17 @@ export function ControlRoom({ initial, onLogout }: { initial: Dashboard; onLogou
 
           {title:'Trading & research',description:'Review ideas and monitor what you own.',ids:['trading','options-telemetry','watchlists','performance']},
 
-          {title:'Account & safety',description:'Connections, limits, and account differences.',ids:['connections','reconciliation','risk-configuration','risk']},
+          {title:'Account & safety',description:'Connections, limits, and account differences.',ids:['acceptance','connections','reconciliation','risk-configuration','risk']},
 
           {title:'Manage your workspace',description:'Preferences, strategy settings, and activity.',ids:['strategy-settings','notifications','activity','settings']},
 
-          {title:'Advanced',description:'Practice runs, device checks, and recovery.',ids:['simulation','acceptance']}
+          {title:'Advanced',description:'Practice runs, device checks, and recovery.',ids:['simulation']}
 
         ].map(group=><section className="panel tool-group" key={group.title}><h3>{group.title}</h3><p>{group.description}</p>{group.ids.map(id=>nav.find(n=>n.id===id)!).map(item=>{const Icon=item.icon;return <button key={item.id} onClick={()=>navigate(item.id)}><Icon size={18}/><span>{item.label}</span><ChevronRight size={16}/></button>;})}</section>)}</div><div className="workspace-footer"><button onClick={()=>void onLogout()}><LogOut size={16}/> Log out</button><span>{dashboard.health.ready?'Manager online':'Manager needs attention'} · {dashboard.mode==='READ_ONLY'?'Read only':dashboard.simulated?'Practice mode':'Live mode'}</span></div></div>}
 
 
 
-        {['trading','settings','acceptance','risk','strategy-settings'].includes(view)&&<details className="authorization-disclosure panel"><summary>Authorize a protected change</summary><SensitiveActionAuth notify={notify}/></details>}
+        {['trading','settings','risk','strategy-settings'].includes(view)&&<details className="authorization-disclosure panel"><summary>Authorize a protected change</summary><SensitiveActionAuth notify={notify}/></details>}
 
         {view==='simulation'&&<SimulationPanel notify={notify}/>}
 
