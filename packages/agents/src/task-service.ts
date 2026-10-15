@@ -52,6 +52,14 @@ export class CodexTaskService{
         this.db.raw.transaction(()=>{const a=response.action;
           if(a?.intent==='pause_strategy'){this.db.setStrategyEnabled(a.strategy,false,task.actor,a.reason);task.result={paused:a.strategy};}
           else if(a?.intent==='pause_all'){revokeAutonomy(this.db,'Operator requested global pause');task.result={paused:true};}
+          else if(a?.intent==='configure_allocations'){
+            if(task.source!=='MANUAL')throw new Error('Scheduled reasoning cannot edit allocation targets');
+            this.proposals.allocation.setWeights(a.weights,task.actor);
+            const account=this.db.getSetting<{accountId:string;healthy:boolean;asOf:string;netAccountValue:number}|null>('broker_account_v2',null),age=Date.now()-Date.parse(account?.asOf??'');
+            const canRebalance=this.db.getMode()==='AUTONOMOUS_LIVE'&&this.db.getSetting('reconciliation_clear',false)&&account?.healthy&&account.accountId===process.env.ROBINHOOD_AGENTIC_ACCOUNT_ID&&age>=-5000&&age<60000;
+            if(canRebalance)this.proposals.allocation.weekly(account!.netAccountValue,task.actor);
+            task.result={weights:a.weights,freeCashRebalanced:!!canRebalance,holdingsChanged:false,summary:response.message};
+          }
           else if(a?.intent==='configure_strategies'){
             if(task.source!=='MANUAL')throw new Error('Scheduled reasoning cannot edit policy');
             if(new Set(a.rules.map(r=>r.strategy)).size!==a.rules.length)throw new Error('Duplicate strategy rules');

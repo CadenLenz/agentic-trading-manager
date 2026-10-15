@@ -21,6 +21,10 @@ export class StrategyAllocationManager {
       this.db.audit(actor,'ALLOCATION_WEIGHTS_UPDATED','account',null,{sleeve,weight});
     })();
   }
+  setWeights(weights:Record<Sleeve,number>,actor:string){
+    if(Object.keys(weights).length!==3||SLEEVES.some(s=>!Number.isFinite(weights[s])||weights[s]<0||weights[s]>1)||Math.abs(SLEEVES.reduce((sum,s)=>sum+weights[s],0)-1)>1e-9)throw new Error('All three sleeve weights must total 100%');
+    this.db.raw.transaction(()=>{for(const s of SLEEVES){const p=this.policy(s);p.targetWeight=weights[s];this.db.raw.prepare('UPDATE sleeve_policies SET config_json=?,updated_at=? WHERE strategy_id=?').run(JSON.stringify(p),nowIso(),s);}this.db.audit(actor,'ALLOCATION_WEIGHTS_UPDATED','account',null,{weights});})();
+  }
   state(sleeve: Sleeve) {
     const s=this.db.getStrategy(sleeve); if (!s) throw new Error('Unknown sleeve');
     const positions=this.ledger.listPositions(sleeve);
