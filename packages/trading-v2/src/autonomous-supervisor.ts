@@ -25,6 +25,7 @@ export interface MonitoredPosition {
 }
 export interface MonitoredOrder {id:string;status:string;filledQuantity:number}
 export interface MonitoredSleeve {
+  marketOpen?:boolean;nextOpen?:string|null;marketHours?:'REGULAR'|'EXTENDED';
   enabled:boolean;autonomous:boolean;killed:boolean;positions:MonitoredPosition[];
   blockedReason?:string;
   orders:MonitoredOrder[];materialEvents?:string[];
@@ -79,6 +80,7 @@ export class AutonomousSupervisor {
   state():SupervisorState{return this.db.getSetting<SupervisorState>('autonomous_supervisor_state_v1',{version:1,lastMonitorAt:null,lastError:null,lastDailyReport:null,lastWeeklyReport:null,sleeves:{SAFE_LONG_TERM:emptySleeve(),AGGRESSIVE_STOCKS:emptySleeve(),OPTIONS:emptySleeve()}});}
   status(){return {config:this.config(),...this.state()};}
   private save(state:SupervisorState){this.db.setSetting('autonomous_supervisor_state_v1',state);}
+  private marketOpen(snapshot:SupervisorSnapshot,sleeve:Sleeve){return snapshot.sleeves[sleeve].marketOpen??snapshot.market.open;}
   private blockReason(snapshot:SupervisorSnapshot,sleeve:Sleeve,config:SupervisorConfig,at:number):string|null {
     const s=snapshot.sleeves[sleeve];
     if(snapshot.stopped||this.db.getSetting('stopped',false))return 'GLOBAL STOP';
@@ -138,7 +140,7 @@ export class AutonomousSupervisor {
       // authorizes a new order and must not depend on Codex availability.
       const active=SLEEVES.filter(s=>snapshot.sleeves[s].orders.some(o=>!terminalOrder(o.status)));
       const monitor=active.length?Math.min(...active.map(s=>config[s].activeOrderPollSeconds)):
-        snapshot.market.open?Math.min(...SLEEVES.filter(s=>snapshot.sleeves[s].enabled).map(s=>config[s].monitorSeconds),60):300;
+        SLEEVES.some(s=>this.marketOpen(snapshot,s))?Math.min(...SLEEVES.filter(s=>snapshot.sleeves[s].enabled).map(s=>config[s].monitorSeconds),60):300;
       if(!state.lastMonitorAt||at-Date.parse(state.lastMonitorAt)>=monitor*1000){
         state.lastMonitorAt=date.toISOString();this.save(state);
         await this.callbacks.reconcile();snapshot=await this.callbacks.snapshot();
@@ -158,10 +160,10 @@ export class AutonomousSupervisor {
           }
         }
         const blocked=this.blockReason(snapshot,sleeve,config[sleeve],at);
-        old.reason=blocked??(snapshot.market.open?'Monitoring current exposure':'Outside market session');
-        old.status=blocked?(blocked.includes('pause')||blocked==='Autonomy is off'?'PAUSED':'BLOCKED'):snapshot.market.open?'AUTONOMOUS':'MARKET_CLOSED';
+        old.reason=blocked??(this.marketOpen(snapshot,sleeve)?'Monitoring current exposure':'Outside market session');
+        old.status=blocked?(blocked.includes('pause')||blocked==='Autonomy is off'?'PAUSED':'BLOCKED'):this.marketOpen(snapshot,sleeve)?'AUTONOMOUS':'MARKET_CLOSED';
         if(old.activeTaskId&&!blocked){old.status='REASONING';old.reason='Codex analysis in progress';}
-        old.nextAnalysisAt=snapshot.market.open?(old.lastAnalysisAt?future(Date.parse(old.lastAnalysisAt),config[sleeve].reviewMinutes*60000):date.toISOString()):snapshot.market.nextOpen;
+        old.nextAnalysisAt=this.marketOpen(snapshot,sleeve)?(old.lastAnalysisAt?future(Date.parse(old.lastAnalysisAt),config[sleeve].reviewMinutes*60000):date.toISOString()):current.nextOpen??snapshot.market.nextOpen;
       }
       this.save(state);
       if(SLEEVES.some(s=>state.sleeves[s].activeTaskId))return;
@@ -169,7 +171,7 @@ export class AutonomousSupervisor {
       // a busy options sleeve cannot occupy every reasoning dispatch slot.
       for(const sleeve of [...SLEEVES].reverse()){
         const old=state.sleeves[sleeve],c=config[sleeve];
-        if(this.blockReason(snapshot,sleeve,c,at)||!snapshot.market.open)continue;
+        if(this.blockReason(snapshot,sleeve,c,at)||!this.marketOpen(snapshot,sleeve))continue;
         const reason=this.reason(sleeve,snapshot.sleeves[sleeve],old,c,snapshot,at);if(!reason)continue;
         const urgent=['Position exposure changed','Broker order or fill state changed','Material risk, thesis, news or catalyst event'].includes(reason);
         if(!urgent&&old.lastAnalysisAt&&at-Date.parse(old.lastAnalysisAt)<c.cooldownMinutes*60000)continue;
@@ -180,7 +182,7 @@ export class AutonomousSupervisor {
         // Re-read STOP, pause, sleeve and market gates after the asynchronous
         // worker check. An operator can stop the app while health is in flight.
         snapshot=await this.callbacks.snapshot();
-        if(this.blockReason(snapshot,sleeve,c,date.getTime())||!snapshot.market.open)continue;
+        if(this.blockReason(snapshot,sleeve,c,date.getTime())||!this.marketOpen(snapshot,sleeve))continue;
         const current=snapshot.sleeves[sleeve],contextHash=stableHash({sleeve,positions:sorted(current.positions),orders:sorted(current.orders),events:[...(current.materialEvents??[])].sort()});
         const id='autonomous_'+stableHash({sleeve,contextHash,at:date.toISOString()}).slice(0,40);
         old.lastAnalysisAt=date.toISOString();old.lastContextHash=contextHash;old.lastPositions=current.positions;old.lastOrders=current.orders;old.lastEvents=current.materialEvents??[];
@@ -189,7 +191,7 @@ export class AutonomousSupervisor {
         old.nextAnalysisAt=future(at,c.reviewMinutes*60000);old.status='REASONING';old.reason=reason;
         this.save(state); // Claim first. An ambiguous enqueue is never replayed.
         try{
-          const task=await this.callbacks.createReasoning({id,sleeve,reason,contextHash,message:`Review ${sleeve}. Trigger: ${reason}. Manage and evaluate existing positions and active orders before considering any new exposure. Read current scoped broker facts and current source evidence. Honor the persisted strategy and all deterministic risk limits. Produce a supported structured proposal with required research only when justified; otherwise report HOLD with a reason. Never call broker placement or cancellation yourself. The deterministic application alone may execute qualifying proposals under the operator's active autonomy authorization.`});
+          const task=await this.callbacks.createReasoning({id,sleeve,reason,contextHash,message:`Review ${sleeve}. Trigger: ${reason}. Manage and evaluate existing positions and active orders before considering any new exposure. Conduct your own fresh research and candidate screening using available read-only tools; do not wait for an operator prompt or restrict research to existing holdings. Follow persisted sleeve strategy and allocation. SAFE prioritizes long-term quality and low turnover; AGGRESSIVE prioritizes liquid momentum/swing setups; OPTIONS researches supported Level-2 setups and manages held contracts first. Size proposals from owned free capital and deterministic limits, without requesting per-trade approval. Use marketHours=${current.marketHours??'REGULAR'}; outside regular hours equities require whole-share LIMIT orders. Read current scoped broker facts and current source evidence. Honor the persisted strategy and all deterministic risk limits. Produce a supported structured proposal with required research only when justified; otherwise report HOLD with a reason. Never call broker placement or cancellation yourself. The deterministic application alone may execute qualifying proposals under the operator's active autonomy authorization.`});
           if(task.id!==id)throw new Error('Autonomous task identity mismatch');
           old.lastTaskStatus='QUEUED';this.db.audit('AUTONOMOUS_SUPERVISOR','AUTONOMOUS_ANALYSIS_QUEUED','strategy',sleeve,{id,reason,contextHash});
         }catch(error){old.lastTaskStatus='UNKNOWN';old.status='BLOCKED';old.reason='Task dispatch uncertain; not replayed';state.lastError=String(error).slice(0,500);return;}

@@ -8,6 +8,7 @@ import {classify,taskInput,taskResponse,taskSettings,defaultSettings,taskType,au
 import {WorkerClient,type WorkerTransport} from './worker-client.js';
 import type {WorkerJob} from './worker.js';
 import {autonomousAuthorized,revokeAutonomy} from '../../trading-v2/src/autonomy.js';
+import {marketClock} from '../../trading-v2/src/market-session.js';
 import {supervisorConfigSchema,DEFAULT_SUPERVISOR_CONFIG,type SupervisorConfig} from '../../trading-v2/src/autonomous-supervisor.js';
 
 export interface AppTask extends WorkerJob{actor:string;source:'MANUAL'|'SCHEDULED'|'AUTONOMOUS';type:TaskInput['type'];authority:TaskInput['authority'];strategy:TaskInput['strategy'];message:string;templateVersion:string;appStateVersion:string;settings:TaskInput['settings'];result:unknown;applied:boolean;dispatched:boolean;executionAttempted?:boolean}
@@ -33,7 +34,7 @@ export class CodexTaskService{
     this.db.raw.transaction(()=>{this.save(task);this.db.audit(actor,'CODEX_TASK_CREATED','codex_task',id,{type:task.type,authority:task.authority,source:task.source,templateVersion});})();return task;
   }
   context(task:AppTask){const strategies=task.strategy?[task.strategy]:SLEEVES;const account=this.db.getSetting<Record<string,unknown>|null>('broker_account_v2',null);
-    return JSON.stringify({asOf:nowIso(),mode:this.db.getMode(),paused:this.db.getSetting('global_pause',true),stopped:this.db.getSetting('stopped',false),reconciled:this.db.getSetting('reconciliation_clear',false),account:account?{accountId:account.accountId,asOf:account.asOf,netAccountValue:account.netAccountValue,buyingPower:account.buyingPower,healthy:account.healthy}:null,
+    return JSON.stringify({asOf:nowIso(),marketSessions:marketClock(this.db),mode:this.db.getMode(),paused:this.db.getSetting('global_pause',true),stopped:this.db.getSetting('stopped',false),reconciled:this.db.getSetting('reconciliation_clear',false),account:account?{accountId:account.accountId,asOf:account.asOf,netAccountValue:account.netAccountValue,buyingPower:account.buyingPower,healthy:account.healthy}:null,
       strategies:strategies.map(s=>({id:s,enabled:this.db.getStrategy(s)?.enabled,allocation:this.proposals.allocation.state(s),risk:new RiskConfigurationService(this.db).current().config})),
       legacyPositions:this.proposals.ledger.legacyPositions(),positions:this.proposals.ledger.listPositions(task.strategy??undefined).slice(0,50),options:(!task.strategy||task.strategy==='OPTIONS')?this.db.raw.prepare('SELECT * FROM option_positions WHERE contracts<>0 LIMIT 50').all():[],
       proposals:this.proposals.list().filter(p=>!task.strategy||p.strategy===task.strategy).slice(0,10),

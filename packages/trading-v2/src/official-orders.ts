@@ -4,10 +4,11 @@ import type {ExecutableOrder,BrokerFill} from './model.js';
 const decimal=z.union([z.number(),z.string().regex(/^-?\d+(\.\d+)?$/)]).transform(Number).pipe(z.number().finite());
 export function brokerReference(clientOrderId:string){const h=createHash('sha256').update('agentic-order:'+clientOrderId).digest('hex');return h.slice(0,8)+'-'+h.slice(8,12)+'-4'+h.slice(13,16)+'-a'+h.slice(17,20)+'-'+h.slice(20,32);}
 export function officialOrderArguments(o:ExecutableOrder,accountId:string,placement=false){
-  if(!['LIMIT','MARKET'].includes(o.orderType)||o.marketHours!=='REGULAR'||o.stopPrice!==null)throw new Error('Only regular-session market/limit orders are commissioned');
+  if(!['LIMIT','MARKET'].includes(o.orderType)||o.stopPrice!==null)throw new Error('Only market/limit orders are supported');
+  if(o.marketHours==='EXTENDED'&&(o.option||o.orderType!=='LIMIT'||!Number.isInteger(o.quantity)))throw new Error('Extended hours require whole-share equity limit orders');
   if(o.option&&(o.orderType!=='LIMIT'||!Number.isInteger(o.quantity)||o.option.multiplier!==100))throw new Error('Only standard single-leg limit options are commissioned');
   if(!o.option&&o.orderType==='LIMIT'&&!Number.isInteger(o.quantity))throw new Error('Official fractional equities require market orders');
-  const common={account_number:accountId,type:o.orderType.toLowerCase(),quantity:String(o.quantity),time_in_force:o.timeInForce==='DAY'?'gfd':'gtc',market_hours:'regular_hours'};
+  const common={account_number:accountId,type:o.orderType.toLowerCase(),quantity:String(o.quantity),time_in_force:o.timeInForce==='DAY'?'gfd':'gtc',market_hours:o.marketHours==='EXTENDED'?'extended_hours':'regular_hours'};
   const args:Record<string,unknown>=o.option?{...common,direction:o.side==='BUY'?'debit':'credit',price:String(o.limitPrice),legs:[{option_id:o.option.optionId,side:o.side.toLowerCase(),position_effect:o.positionEffect.toLowerCase(),ratio_quantity:1}],...(!placement?{chain_symbol:o.option.underlying,underlying_type:'equity'}:{})}:{...common,symbol:o.symbol,side:o.side.toLowerCase(),...(o.limitPrice!==null?{limit_price:String(o.limitPrice)}:{})};
   if(placement)args.ref_id=brokerReference(o.clientOrderId);return args;
 }

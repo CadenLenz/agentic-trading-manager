@@ -3,6 +3,7 @@ import {AutonomousSupervisor,type SupervisorSnapshot,type MonitoredSleeve} from 
 import {sleeveExecutionBlocked,suspendAutonomy} from './autonomy.js';
 import {SLEEVES,type TradingAccount,type ProposalInput,type OptionInstrument} from './model.js';
 import {zonedDate} from './scheduling.js';
+import {marketClock} from './market-session.js';
 
 export async function refreshOptionMonitoring(m:AgenticManager){
   const db=m.database,at=new Date(),session=db.raw.prepare('SELECT opens_at,closes_at FROM market_sessions WHERE date=?').get(zonedDate(at)) as {opens_at:string;closes_at:string}|undefined;
@@ -25,11 +26,12 @@ export function createAutonomousSupervisor(m:AgenticManager){
     snapshot:()=>{
       const now=new Date(),date=zonedDate(now),a=db.getSetting<TradingAccount|null>('broker_account_v2',null);
       const session=db.raw.prepare('SELECT opens_at,closes_at,verified_at FROM market_sessions WHERE date=?').get(date) as {opens_at:string;closes_at:string;verified_at:string}|undefined;
-      const verified=!!session&&Date.now()-Date.parse(session.verified_at)<7*86400000;
+      const verified=!!session&&Date.now()-Date.parse(session.verified_at)<7*86400000,clock=marketClock(db,now);
       const sleeves=Object.fromEntries(SLEEVES.map(s=>{
         const state=m.allocation.state(s);
+        const risk=m.riskConfiguration.effective(s,s==='OPTIONS'?'OPTION':'EQUITY','DEFAULT'),extended=s!=='OPTIONS'&&risk.extendedHoursAllowed&&risk.allowedMarketSessions.includes('EXTENDED');
         const orders=db.raw.prepare("SELECT id,status,cumulative_filled_quantity AS filledQuantity FROM orders WHERE strategy_id=? AND status IN ('PENDING','SUBMITTED','PARTIALLY_FILLED','UNKNOWN')").all(s) as MonitoredSleeve['orders'];
-        return [s,{enabled:!!db.getStrategy(s)?.enabled,autonomous:state.policy.executionPolicy==='AUTONOMOUS_RISK_APPROVED'&&!!db.getSetting('autonomous_authorization_v1',null),killed:state.killed,blockedReason:sleeveExecutionBlocked(db,s)?'UNKNOWN_OUTCOME; never resend':s==='OPTIONS'?db.getSetting<string|null>('option_monitor_fault',null)??undefined:undefined,orders,
+        return [s,{marketOpen:extended?clock.equityOpen:clock.regularOpen,nextOpen:extended?clock.nextEquityOpen:clock.nextRegularOpen,marketHours:!clock.regularOpen&&extended?'EXTENDED':'REGULAR',enabled:!!db.getStrategy(s)?.enabled,autonomous:state.policy.executionPolicy==='AUTONOMOUS_RISK_APPROVED'&&!!db.getSetting('autonomous_authorization_v1',null),killed:state.killed,blockedReason:sleeveExecutionBlocked(db,s)?'UNKNOWN_OUTCOME; never resend':s==='OPTIONS'?db.getSetting<string|null>('option_monitor_fault',null)??undefined:undefined,orders,
           positions:[...state.positions.map(p=>({id:p.symbol,quantity:p.quantity,price:p.marketPrice})),...state.options.map(p=>({id:p.option_id,quantity:p.contracts,price:p.mark_price,expiresAt:(JSON.parse(p.instrument_json) as {expiration:string}).expiration,...db.getSetting<{underlyingPrice?:number;spreadPercent?:number;delta?:number;iv?:number}>('option_monitor:'+p.option_id,{})}))],
           materialEvents:[...state.positions.filter(p=>p.averageCost!==null).flatMap(p=>{const r=m.riskConfiguration.effective(s,p.assetType==='ETF'?'ETF':'EQUITY',p.symbol),change=100*(p.marketPrice/p.averageCost!-1);return r.exitMethod==='PERCENT'&&(change<=-r.stopPercent||change>=r.takeProfitPercent)?[p.symbol+':'+(change<0?'STOP_THRESHOLD':'PROFIT_THRESHOLD')]:[];}),...state.options.flatMap(p=>{const i=JSON.parse(p.instrument_json) as {underlying:string},r=m.riskConfiguration.effective(s,'OPTION',i.underlying),change=Math.sign(p.contracts)*100*(p.mark_price/p.average_premium-1);return change<=-r.stopPercent||change>=r.takeProfitPercent?[p.option_id+':'+(change<0?'STOP_THRESHOLD':'PROFIT_THRESHOLD')]:[];})]}];
       })) as SupervisorSnapshot['sleeves'];

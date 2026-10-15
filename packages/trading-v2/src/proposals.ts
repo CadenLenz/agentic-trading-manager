@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import {sessionAllows} from './market-session.js';
 import type { AppDatabase } from '../../database/src/database.js';
 import type { VirtualPortfolioLedger } from '../../ledger/src/virtual-ledger.js';
 import { makeId, nowIso, roundMoney } from '../../core/src/utils.js';
@@ -129,9 +130,8 @@ export class ProposalService {
     check('RESEARCH_COMPLETE',closing||research.success&&(this.db.getMode()==='AUTONOMOUS_LIVE'||RESEARCH_REQUIRED[p.strategy].every(c=>research.data.items.some(i=>i.category===c))));
     check('RESEARCH_FRESH',closing||research.success&&research.data.items.every(i=>now-Date.parse(i.observedAt)>=-5000&&now-Date.parse(i.observedAt)<=policy.maxResearchAgeHours*3600000));
     check('RESEARCH_REAL',closing||this.db.getMode()==='SIMULATION'||(research.success&&!research.data.simulated));
-    const session=this.db.raw.prepare('SELECT * FROM market_sessions WHERE opens_at<=? AND closes_at>?').get(nowIso(),nowIso()) as {verified_at:string}|undefined;
-    check('MARKET_SESSION',this.db.getMode()==='SIMULATION'?this.db.getSetting('simulation_market_open',true):!!session&&now-Date.parse(session.verified_at)<7*86400000);
-    check('SUPPORTED_ORDER',(p.orderType==='LIMIT'&&!p.option&&Number.isInteger(p.quantity)||p.orderType==='LIMIT'&&!!p.option||!p.option&&p.orderType==='MARKET')&&p.marketHours==='REGULAR'&&p.dollarAmount===null,'Official regular-hours equity market/whole-share limit and single-leg option limit orders only');
+    check('MARKET_SESSION',this.db.getMode()==='SIMULATION'?this.db.getSetting('simulation_market_open',true):sessionAllows(this.db,p.marketHours,!!p.option));
+    check('SUPPORTED_ORDER',(p.marketHours==='EXTENDED'?p.orderType==='LIMIT'&&!p.option&&Number.isInteger(p.quantity):(p.orderType==='LIMIT'&&!p.option&&Number.isInteger(p.quantity)||p.orderType==='LIMIT'&&!!p.option||!p.option&&p.orderType==='MARKET'))&&p.dollarAmount===null,'Extended equities require whole-share LIMIT orders; options remain regular-session LIMIT only');
     check('SLEEVE_ASSET',p.strategy==='OPTIONS'?p.assetClass==='OPTION':p.assetClass!=='OPTION');
     check('HOLDING_PLAN',p.positionEffect==='CLOSE'||p.strategy==='SAFE_LONG_TERM'?(p.positionEffect==='CLOSE'||p.holdingTradingDays===null||p.holdingTradingDays>=90):(p.holdingTradingDays!==null&&p.holdingTradingDays<=sleevePolicy.maxHoldingTradingDays));
     const directives=this.db.raw.prepare("SELECT type,value_json FROM directives WHERE active=1 AND (strategy_id IS NULL OR strategy_id=?) AND (symbol IS NULL OR symbol IN (?,?)) AND (expires_at IS NULL OR expires_at>?)").all(p.strategy,p.symbol,p.underlying,nowIso()) as Array<{type:string;value_json:string}>;

@@ -13,6 +13,15 @@ function fixture(){
   return {db,snapshot,callbacks,supervisor,tick:async(minutes=0)=>{now=new Date(start.getTime()+minutes*60000);await supervisor.tick(now);},setTaskStatus:(s:SupervisorTaskStatus)=>{taskStatus=s;}};
 }
 describe('deterministic autonomous supervisor',()=>{
+  it('researches equities unprompted in an eligible extended session while options remain closed',async()=>{
+    const f=fixture();f.snapshot.market.open=false;
+    for(const s of ['SAFE_LONG_TERM','AGGRESSIVE_STOCKS'] as const)Object.assign(f.snapshot.sleeves[s],{marketOpen:true,marketHours:'EXTENDED'});
+    f.snapshot.sleeves.OPTIONS.marketOpen=false;await f.tick();
+    expect(f.callbacks.createReasoning).toHaveBeenLastCalledWith(expect.objectContaining({sleeve:'AGGRESSIVE_STOCKS',message:expect.stringContaining('Conduct your own fresh research')}));
+    expect(vi.mocked(f.callbacks.createReasoning).mock.calls[0]![0].message).toContain('marketHours=EXTENDED');
+    await f.tick(.25);expect(f.callbacks.createReasoning).toHaveBeenLastCalledWith(expect.objectContaining({sleeve:'SAFE_LONG_TERM'}));
+    expect(f.supervisor.state().sleeves.OPTIONS.status).toBe('MARKET_CLOSED');
+  });
   it('rechecks held options periodically and reacts to exits during the ordinary cooldown',async()=>{
     const f=fixture();await f.tick();await f.tick(.25);await f.tick(.5);
     f.snapshot.sleeves.OPTIONS.materialEvents=['option:STOP_THRESHOLD'];await f.tick(1);
